@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.vscode/
+dist/
+out/
+.venv/
+__pycache__/
+*.pyc
+odx-data/training/*.pt
+odx-data/training/versions/
+.vscode-test/

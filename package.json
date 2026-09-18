@@ -1,0 +1,71 @@
+{
+  "name": "my-mini-agent",
+  "displayName": "My Mini AI Agent",
+  "description": "An AI coding assistant powered by Gemini 3.6 Flash and Supabase vector memory for Next.js, React, TypeScript, and full-stack development.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.137.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:my-mini-agent.chatView",
+    "onCommand:my-mini-agent.start"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "my-mini-agent.start",
+        "title": "Start My Mini Agent"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "my-mini-agent-sidebar",
+          "title": "Mini Agent AI",
+          "icon": "$(bot)"
+        }
+      ]
+    },
+    "views": {
+      "my-mini-agent-sidebar": [
+        {
+          "type": "webview",
+          "id": "my-mini-agent.chatView",
+          "name": "Chat Assistant"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --fix",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "@types/vscode": "^1.137.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "eslint": "^10.5.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "@google/genai": "^2.22.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "dotenv": "^16.4.5"
+  }
+}
