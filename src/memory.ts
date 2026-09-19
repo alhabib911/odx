@@ -21,10 +21,11 @@ if (!SUPABASE_KEY) {
   );
 }
 
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_KEY
-);
+const supabase =
+  createClient(
+    SUPABASE_URL,
+    SUPABASE_KEY
+  );
 
 function createContentHash(
   prompt: string,
@@ -38,22 +39,22 @@ function createContentHash(
   ].join('|');
 
   return createHash('sha256')
-    .update(normalizedContent, 'utf8')
+    .update(
+      normalizedContent,
+      'utf8'
+    )
     .digest('hex');
 }
 
 function sanitizeSearchWord(
   word: string
 ): string {
-
   return word
     .trim()
-    // punctuation remove, but Bangla/Unicode letters and numbers keep
     .replace(
       /[^\p{L}\p{N}_%\\-]+/gu,
       ''
     )
-    // Supabase/PostgREST special characters escape
     .replace(/\\/g, '\\\\')
     .replace(/%/g, '\\%')
     .replace(/_/g, '\\_')
@@ -63,39 +64,58 @@ function sanitizeSearchWord(
 export async function searchTextInMemory(
   prompt: string
 ) {
+  const rawWords =
+    prompt
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(
+        (word) =>
+          word.length > 2
+      );
 
-  const rawWords = prompt
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(
-      (word) => word.length > 2
+  const words =
+    Array.from(
+      new Set(
+        rawWords
+          .map(
+            sanitizeSearchWord
+          )
+          .filter(
+            (word) =>
+              word.length > 2
+          )
+      )
     );
 
-  const words = Array.from(
-    new Set(
-      rawWords
-        .map(sanitizeSearchWord)
-        .filter(
-          (word) => word.length > 2
-        )
-    )
-  );
-
-  if (words.length === 0) {
+  if (
+    words.length === 0
+  ) {
     return null;
   }
 
   const conditions =
-    words.flatMap((word) => [
-      `prompt.ilike.*${word}*`,
-      `code_content.ilike.*${word}*`
-    ]);
+    words.flatMap(
+      (word) => [
+        `prompt.ilike.*${word}*`,
+        `code_content.ilike.*${word}*`
+      ]
+    );
 
-  const { data, error } =
+  const {
+    data,
+    error
+  } =
     await supabase
       .from('agent_memory')
       .select(
-        'id, prompt, file_path, code_content, created_at, content_hash'
+        `
+        id,
+        prompt,
+        file_path,
+        code_content,
+        created_at,
+        content_hash
+        `
       )
       .or(
         conditions.join(',')
@@ -103,7 +123,6 @@ export async function searchTextInMemory(
       .limit(5);
 
   if (error) {
-
     console.error(
       'Text memory search error:',
       error
@@ -129,7 +148,6 @@ export async function searchTextInMemory(
 export async function searchVectorInMemory(
   embedding?: number[]
 ) {
-
   if (
     !embedding ||
     embedding.length === 0
@@ -137,18 +155,23 @@ export async function searchVectorInMemory(
     return null;
   }
 
-  const { data, error } =
+  const {
+    data,
+    error
+  } =
     await supabase.rpc(
       'match_snippets',
       {
-        query_embedding: embedding,
-        match_threshold: 0.82,
-        match_count: 3
+        query_embedding:
+          embedding,
+        match_threshold:
+          0.82,
+        match_count:
+          5
       }
     );
 
   if (error) {
-
     console.error(
       'Vector memory search error:',
       error
@@ -171,9 +194,10 @@ export async function searchInMemory(
   prompt: string,
   embedding?: number[]
 ) {
-
   const textResults =
-    await searchTextInMemory(prompt);
+    await searchTextInMemory(
+      prompt
+    );
 
   const vectorResults =
     await searchVectorInMemory(
@@ -183,11 +207,71 @@ export async function searchInMemory(
   return {
     textResults:
       textResults || [],
-
     vectorResults:
       vectorResults || []
   };
 }
+
+/*
+ * =====================================================
+ * SEMANTIC DUPLICATE CHECK
+ * =====================================================
+ */
+
+async function findSemanticDuplicate(
+  embedding?: number[]
+) {
+  if (
+    !embedding ||
+    embedding.length === 0
+  ) {
+    return null;
+  }
+
+  const {
+    data,
+    error
+  } =
+    await supabase.rpc(
+      'match_snippets',
+      {
+        query_embedding:
+          embedding,
+
+        // High threshold:
+        // very similar knowledge only.
+        match_threshold:
+          0.94,
+
+        match_count:
+          1
+      }
+    );
+
+  if (error) {
+    console.error(
+      'Semantic duplicate check error:',
+      error
+    );
+
+    return null;
+  }
+
+  if (
+    !data ||
+    data.length === 0
+  ) {
+    return null;
+  }
+
+  return data[0];
+}
+
+/*
+ * =====================================================
+ * SAVE MEMORY
+ * =====================================================
+ */
 
 export async function saveToMemory(
   prompt: string,
@@ -195,28 +279,53 @@ export async function saveToMemory(
   code: string,
   embedding?: number[]
 ) {
+  const normalizedPrompt =
+    prompt.trim();
+
+  const normalizedFilePath =
+    filePath.trim();
+
+  const normalizedCode =
+    code.trim();
+
+  if (
+    !normalizedPrompt ||
+    !normalizedCode
+  ) {
+    throw new Error(
+      'Memory save-এর জন্য prompt এবং code প্রয়োজন।'
+    );
+  }
 
   const contentHash =
     createContentHash(
-      prompt,
-      filePath,
-      code
+      normalizedPrompt,
+      normalizedFilePath,
+      normalizedCode
     );
+
+  /*
+   * ==================================================
+   * 1. EXACT DUPLICATE CHECK
+   * ==================================================
+   */
 
   const {
     data: existingMemory,
     error: checkError
-  } = await supabase
-    .from('agent_memory')
-    .select('id')
-    .eq(
-      'content_hash',
-      contentHash
-    )
-    .limit(1);
+  } =
+    await supabase
+      .from('agent_memory')
+      .select(
+        'id'
+      )
+      .eq(
+        'content_hash',
+        contentHash
+      )
+      .limit(1);
 
   if (checkError) {
-
     console.error(
       'Duplicate memory check error:',
       checkError
@@ -231,18 +340,63 @@ export async function saveToMemory(
     existingMemory &&
     existingMemory.length > 0
   ) {
-
     console.log(
-      'Duplicate memory skipped:',
+      'Exact duplicate memory skipped:',
       contentHash
     );
 
     vscode.window.showInformationMessage(
-      '🧠 Duplicate knowledge detected. Memory save skipped.'
+      '🧠 Exact duplicate knowledge detected. Save skipped.'
     );
 
     return existingMemory;
   }
+
+  /*
+   * ==================================================
+   * 2. SEMANTIC DUPLICATE CHECK
+   * ==================================================
+   */
+
+  if (
+    embedding &&
+    embedding.length > 0
+  ) {
+    const semanticDuplicate =
+      await findSemanticDuplicate(
+        embedding
+      );
+
+    if (
+      semanticDuplicate
+    ) {
+      console.log(
+        'Semantic duplicate memory skipped:',
+        {
+          existingId:
+            semanticDuplicate.id,
+          existingPrompt:
+            semanticDuplicate.prompt,
+          existingFile:
+            semanticDuplicate.file_path
+        }
+      );
+
+      vscode.window.showInformationMessage(
+        '🧠 Similar knowledge already exists. New duplicate save skipped.'
+      );
+
+      return [
+        semanticDuplicate
+      ];
+    }
+  }
+
+  /*
+   * ==================================================
+   * 3. PREPARE MEMORY DATA
+   * ==================================================
+   */
 
   const memoryData: {
     prompt: string;
@@ -251,10 +405,17 @@ export async function saveToMemory(
     content_hash: string;
     embedding?: number[];
   } = {
-    prompt,
-    file_path: filePath,
-    code_content: code,
-    content_hash: contentHash
+    prompt:
+      normalizedPrompt,
+
+    file_path:
+      normalizedFilePath,
+
+    code_content:
+      normalizedCode,
+
+    content_hash:
+      contentHash
   };
 
   if (
@@ -265,18 +426,31 @@ export async function saveToMemory(
       embedding;
   }
 
+  /*
+   * ==================================================
+   * 4. INSERT
+   * ==================================================
+   */
+
   const {
     data,
     error
-  } = await supabase
-    .from('agent_memory')
-    .insert([memoryData])
-    .select();
+  } =
+    await supabase
+      .from('agent_memory')
+      .insert([
+        memoryData
+      ])
+      .select();
 
   if (error) {
-
-    if (error.code === '23505') {
-
+    /*
+     * PostgreSQL unique violation.
+     */
+    if (
+      error.code ===
+      '23505'
+    ) {
       vscode.window.showInformationMessage(
         '🧠 Duplicate knowledge detected. Memory save skipped.'
       );
@@ -298,13 +472,19 @@ export async function saveToMemory(
     );
   }
 
+  /*
+   * ==================================================
+   * 5. SUCCESS
+   * ==================================================
+   */
+
   console.log(
     'Memory saved successfully:',
     data
   );
 
   vscode.window.showInformationMessage(
-    '🧠 Memory successfully saved to Supabase!'
+    '🧠 New knowledge successfully saved to Supabase!'
   );
 
   return data;
