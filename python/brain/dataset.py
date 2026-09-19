@@ -1,5 +1,6 @@
 import json
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -23,18 +24,66 @@ DATASET_FILE = (
 )
 
 
+def normalize_text(
+    text: str
+) -> str:
+    """
+    Normalize text so trivial formatting differences
+    do not create duplicate training samples.
+    """
+
+    if not text:
+        return ""
+
+    text = str(text)
+
+    text = text.replace(
+        "\r\n",
+        "\n"
+    ).replace(
+        "\r",
+        "\n"
+    )
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
+    return text.strip()
+
+
 def create_hash(
     prompt: str,
     knowledge: str,
     solution: str,
 ) -> str:
 
+    normalized_prompt = normalize_text(
+        prompt
+    )
+
+    normalized_knowledge = normalize_text(
+        knowledge
+    )
+
+    normalized_solution = normalize_text(
+        solution
+    )
+
     content = (
-        prompt.strip()
+        normalized_prompt
         + "|"
-        + knowledge.strip()
+        + normalized_knowledge
         + "|"
-        + solution.strip()
+        + normalized_solution
     )
 
     return hashlib.sha256(
@@ -49,27 +98,40 @@ def load_training_data():
 
     data = []
 
-    with open(
-        DATASET_FILE,
-        "r",
-        encoding="utf-8"
-    ) as file:
+    try:
+        with open(
+            DATASET_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
 
-        for line in file:
+            for line in file:
 
-            line = line.strip()
+                line = line.strip()
 
-            if not line:
-                continue
+                if not line:
+                    continue
 
-            try:
+                try:
+                    item = json.loads(
+                        line
+                    )
 
-                data.append(
-                    json.loads(line)
-                )
+                    if isinstance(
+                        item,
+                        dict
+                    ):
+                        data.append(item)
 
-            except json.JSONDecodeError:
-                continue
+                except json.JSONDecodeError:
+                    continue
+
+    except OSError as error:
+
+        print(
+            f"ODX Training Read Error: {error}",
+            file=sys.stderr
+        )
 
     return data
 
@@ -80,8 +142,37 @@ def add_training_data(
     solution: str,
 ):
 
-    existing_data =
+    prompt = normalize_text(
+        prompt
+    )
+
+    knowledge = normalize_text(
+        knowledge
+    )
+
+    solution = normalize_text(
+        solution
+    )
+
+    if not prompt:
+        print(
+            "ODX Training Error: prompt is required.",
+            file=sys.stderr
+        )
+
+        return False
+
+    if not solution:
+        print(
+            "ODX Training Error: solution is required.",
+            file=sys.stderr
+        )
+
+        return False
+
+    existing_data = (
         load_training_data()
+    )
 
     content_hash = create_hash(
         prompt,
@@ -89,15 +180,25 @@ def add_training_data(
         solution
     )
 
+    # ==================================================
+    # EXACT DUPLICATE CHECK
+    # ==================================================
+
     for item in existing_data:
 
-        if item.get("hash") == content_hash:
-
+        if (
+            item.get("hash")
+            == content_hash
+        ):
             print(
                 "ODX Training: duplicate skipped."
             )
 
             return False
+
+    # ==================================================
+    # SAVE NEW TRAINING SAMPLE
+    # ==================================================
 
     item = {
         "hash": content_hash,
@@ -106,19 +207,30 @@ def add_training_data(
         "solution": solution,
     }
 
-    with open(
-        DATASET_FILE,
-        "a",
-        encoding="utf-8"
-    ) as file:
+    try:
 
-        file.write(
-            json.dumps(
-                item,
-                ensure_ascii=False
+        with open(
+            DATASET_FILE,
+            "a",
+            encoding="utf-8"
+        ) as file:
+
+            file.write(
+                json.dumps(
+                    item,
+                    ensure_ascii=False
+                )
+                + "\n"
             )
-            + "\n"
+
+    except OSError as error:
+
+        print(
+            f"ODX Training Write Error: {error}",
+            file=sys.stderr
         )
+
+        return False
 
     print(
         "ODX Training: sample added."
@@ -132,6 +244,70 @@ def add_training_data(
     return True
 
 
+def process_input_line(
+    line: str
+) -> bool:
+
+    line = line.strip()
+
+    if not line:
+        return False
+
+    try:
+
+        item = json.loads(
+            line
+        )
+
+    except json.JSONDecodeError as error:
+
+        print(
+            f"ODX Training JSON Error: {error}",
+            file=sys.stderr
+        )
+
+        return False
+
+    if not isinstance(
+        item,
+        dict
+    ):
+
+        print(
+            "ODX Training Error: input must be a JSON object.",
+            file=sys.stderr
+        )
+
+        return False
+
+    prompt = normalize_text(
+        item.get(
+            "prompt",
+            ""
+        )
+    )
+
+    knowledge = normalize_text(
+        item.get(
+            "knowledge",
+            ""
+        )
+    )
+
+    solution = normalize_text(
+        item.get(
+            "solution",
+            ""
+        )
+    )
+
+    return add_training_data(
+        prompt,
+        knowledge,
+        solution
+    )
+
+
 if __name__ == "__main__":
 
     input_data = (
@@ -143,52 +319,9 @@ if __name__ == "__main__":
 
         for line in input_data.splitlines():
 
-            line = line.strip()
-
-            if not line:
-                continue
-
-            try:
-
-                item = json.loads(line)
-
-                prompt = item.get(
-                    "prompt",
-                    ""
-                ).strip()
-
-                knowledge = item.get(
-                    "knowledge",
-                    ""
-                ).strip()
-
-                solution = item.get(
-                    "solution",
-                    ""
-                ).strip()
-
-                if not prompt:
-                    raise ValueError(
-                        "prompt is required"
-                    )
-
-                if not solution:
-                    raise ValueError(
-                        "solution is required"
-                    )
-
-                add_training_data(
-                    prompt,
-                    knowledge,
-                    solution
-                )
-
-            except Exception as error:
-
-                print(
-                    f"ODX Training Error: {error}",
-                    file=sys.stderr
-                )
+            process_input_line(
+                line
+            )
 
     else:
 

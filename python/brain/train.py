@@ -1,6 +1,7 @@
 import sys
 import json
 import shutil
+import random
 from pathlib import Path
 from datetime import datetime
 
@@ -47,10 +48,14 @@ VERSIONS_DIR.mkdir(
 )
 
 
+EPOCHS = 60
+LEARNING_RATE = 0.0007
+GRADIENT_CLIP = 1.0
+
+
 def load_training_samples(
     tokenizer
 ):
-
     samples = []
 
     training_file = (
@@ -59,7 +64,6 @@ def load_training_samples(
     )
 
     if not training_file.exists():
-
         return samples
 
     with open(
@@ -75,36 +79,168 @@ def load_training_samples(
             if not line:
                 continue
 
-            item = json.loads(line)
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-            text = (
+            instruction = str(
                 item.get(
                     "instruction",
                     ""
                 )
-                + "\n"
-                + item.get(
+            ).strip()
+
+            context = str(
+                item.get(
                     "context",
                     ""
                 )
-                + "\n"
-                + item.get(
+            ).strip()
+
+            response = str(
+                item.get(
                     "response",
                     ""
                 )
+            ).strip()
+
+            text_parts = []
+
+            if instruction:
+                text_parts.append(
+                    "USER:\n" + instruction
+                )
+
+            if context:
+                text_parts.append(
+                    "CONTEXT:\n" + context
+                )
+
+            if response:
+                text_parts.append(
+                    "RESPONSE:\n" + response
+                )
+
+            text = "\n\n".join(
+                text_parts
             )
+
+            if not text:
+                continue
 
             tokens = tokenizer.encode(
                 text
             )
 
             if len(tokens) > 1:
-
-                samples.append(
-                    tokens
-                )
+                samples.append(tokens)
 
     return samples
+
+
+def copy_matching_weights(
+    old_model,
+    old_vocab,
+    new_model,
+    new_vocab
+):
+    """
+    Transfer learned weights from the previous model
+    into the new model even when vocabulary grows.
+
+    This prevents retraining from zero every time.
+    """
+
+    if not old_vocab:
+        return
+
+    old_state = old_model.state_dict()
+    new_state = new_model.state_dict()
+
+    # ---------------------------------------------
+    # Embedding
+    # ---------------------------------------------
+
+    for token, new_id in new_vocab.items():
+
+        old_id = old_vocab.get(token)
+
+        if old_id is None:
+            continue
+
+        if (
+            old_id < old_state["embedding.weight"].shape[0]
+            and
+            new_id < new_state["embedding.weight"].shape[0]
+        ):
+
+            new_state[
+                "embedding.weight"
+            ][new_id].copy_(
+                old_state[
+                    "embedding.weight"
+                ][old_id]
+            )
+
+    # ---------------------------------------------
+    # Output layer
+    # ---------------------------------------------
+
+    for token, new_id in new_vocab.items():
+
+        old_id = old_vocab.get(token)
+
+        if old_id is None:
+            continue
+
+        if (
+            old_id < old_state["output.weight"].shape[0]
+            and
+            new_id < new_state["output.weight"].shape[0]
+        ):
+
+            new_state[
+                "output.weight"
+            ][new_id].copy_(
+                old_state[
+                    "output.weight"
+                ][old_id]
+            )
+
+            new_state[
+                "output.bias"
+            ][new_id].copy_(
+                old_state[
+                    "output.bias"
+                ][old_id]
+            )
+
+    # ---------------------------------------------
+    # GRU weights
+    # ---------------------------------------------
+
+    for key in [
+        "gru.weight_ih_l0",
+        "gru.weight_hh_l0",
+        "gru.bias_ih_l0",
+        "gru.bias_hh_l0"
+    ]:
+
+        if key in old_state and key in new_state:
+
+            if (
+                old_state[key].shape ==
+                new_state[key].shape
+            ):
+
+                new_state[key].copy_(
+                    old_state[key]
+                )
+
+    new_model.load_state_dict(
+        new_state
+    )
 
 
 def calculate_loss(
@@ -128,6 +264,9 @@ def calculate_loss(
 
         for tokens in samples:
 
+            if len(tokens) < 2:
+                continue
+
             inputs = torch.tensor(
                 tokens[:-1],
                 dtype=torch.long
@@ -147,7 +286,9 @@ def calculate_loss(
                     -1,
                     vocab_size
                 ),
-                targets.reshape(-1)
+                targets.reshape(
+                    -1
+                )
             )
 
             total_loss += (
@@ -155,8 +296,11 @@ def calculate_loss(
             )
 
     return (
-        total_loss
-        / len(samples)
+        total_loss /
+        max(
+            len(samples),
+            1
+        )
     )
 
 
@@ -178,24 +322,86 @@ def save_version(
     return version_file
 
 
+def load_previous_model(
+    vocabulary,
+    vocab_size
+):
+    """
+    Load the current brain and expand it to the
+    new vocabulary when necessary.
+    """
+
+    if not MODEL_FILE.exists():
+        return None
+
+    try:
+
+        checkpoint = torch.load(
+            MODEL_FILE,
+            map_location="cpu"
+        )
+
+        old_vocab = checkpoint.get(
+            "vocab"
+        )
+
+        old_vocab_size = checkpoint.get(
+            "vocab_size"
+        )
+
+        if not old_vocab or not old_vocab_size:
+            return None
+
+        old_model = ODXBrain(
+            vocab_size=old_vocab_size
+        )
+
+        old_model.load_state_dict(
+            checkpoint[
+                "model_state"
+            ]
+        )
+
+        old_model.eval()
+
+        expanded_model = ODXBrain(
+            vocab_size=vocab_size
+        )
+
+        expanded_model.eval()
+
+        copy_matching_weights(
+            old_model,
+            old_vocab,
+            expanded_model,
+            vocabulary
+        )
+
+        return expanded_model
+
+    except Exception as error:
+
+        print(
+            "Previous Brain load skipped:",
+            error
+        )
+
+        return None
+
+
 def train():
-
     print(
-        "🧠 ODX Brain training started..."
+        "🧠 ODX Brain incremental training started..."
     )
 
-    vocabulary = (
-        build_vocabulary()
-    )
+    vocabulary = build_vocabulary()
 
     tokenizer = ODXTokenizer(
         vocabulary
     )
 
-    samples = (
-        load_training_samples(
-            tokenizer
-        )
+    samples = load_training_samples(
+        tokenizer
     )
 
     if not samples:
@@ -210,28 +416,96 @@ def train():
         tokenizer.vocab
     )
 
-    new_model = ODXBrain(
-        vocab_size=vocab_size
+    print(
+        f"🧠 ODX Vocabulary size: {vocab_size}"
     )
+
+    print(
+        f"📚 Training samples: {len(samples)}"
+    )
+
+    # -------------------------------------------------
+    # Load previous brain and transfer its knowledge.
+    # -------------------------------------------------
+
+    previous_model = load_previous_model(
+        vocabulary,
+        vocab_size
+    )
+
+    if previous_model is not None:
+
+        print(
+            "♻️ Previous Brain loaded."
+        )
+
+        print(
+            "🧠 Existing learned weights preserved."
+        )
+
+        old_loss = calculate_loss(
+            previous_model,
+            samples,
+            vocab_size
+        )
+
+    else:
+
+        print(
+            "🆕 No compatible previous Brain found."
+        )
+
+        previous_model = ODXBrain(
+            vocab_size=vocab_size
+        )
+
+        old_loss = calculate_loss(
+            previous_model,
+            samples,
+            vocab_size
+        )
+
+    print(
+        f"🧪 Before Training Loss: {old_loss:.6f}"
+    )
+
+    # -------------------------------------------------
+    # Training starts from previous knowledge,
+    # not from random weights.
+    # -------------------------------------------------
+
+    new_model = previous_model
 
     optimizer = optim.Adam(
         new_model.parameters(),
-        lr=0.001
+        lr=LEARNING_RATE
     )
 
     loss_function = (
         nn.CrossEntropyLoss()
     )
 
-    epochs = 100
-
     new_model.train()
 
-    for epoch in range(epochs):
+    training_samples = list(
+        samples
+    )
+
+    for epoch in range(
+        EPOCHS
+    ):
+
+        random.shuffle(
+            training_samples
+        )
 
         total_loss = 0.0
+        processed = 0
 
-        for tokens in samples:
+        for tokens in training_samples:
+
+            if len(tokens) < 2:
+                continue
 
             inputs = torch.tensor(
                 tokens[:-1],
@@ -254,10 +528,17 @@ def train():
                     -1,
                     vocab_size
                 ),
-                targets.reshape(-1)
+                targets.reshape(
+                    -1
+                )
             )
 
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                new_model.parameters(),
+                GRADIENT_CLIP
+            )
 
             optimizer.step()
 
@@ -265,17 +546,31 @@ def train():
                 loss.item()
             )
 
+            processed += 1
+
         if (
             epoch == 0
             or (epoch + 1) % 10 == 0
         ):
 
+            average_epoch_loss = (
+                total_loss /
+                max(
+                    processed,
+                    1
+                )
+            )
+
             print(
                 f"Epoch "
-                f"{epoch + 1}/{epochs} "
+                f"{epoch + 1}/{EPOCHS} "
                 f"Loss: "
-                f"{total_loss:.6f}"
+                f"{average_epoch_loss:.6f}"
             )
+
+    # -------------------------------------------------
+    # Final evaluation
+    # -------------------------------------------------
 
     new_loss = calculate_loss(
         new_model,
@@ -284,8 +579,7 @@ def train():
     )
 
     print(
-        f"🧪 New Brain Loss: "
-        f"{new_loss:.6f}"
+        f"🧪 After Training Loss: {new_loss:.6f}"
     )
 
     now = datetime.now()
@@ -313,11 +607,17 @@ def train():
         "loss":
             new_loss,
 
+        "previous_loss":
+            old_loss,
+
         "version":
             version_name,
 
         "created_at":
-            now.isoformat()
+            now.isoformat(),
+
+        "training_mode":
+            "incremental"
     }
 
     version_file = save_version(
@@ -325,66 +625,12 @@ def train():
         version_name
     )
 
-    old_loss = None
-
-    if MODEL_FILE.exists():
-
-        try:
-
-            old_checkpoint = torch.load(
-                MODEL_FILE,
-                map_location="cpu"
-            )
-
-            old_vocab_size = (
-                old_checkpoint[
-                    "vocab_size"
-                ]
-            )
-
-            old_vocab = (
-                old_checkpoint.get(
-                    "vocab"
-                )
-            )
-
-            if (
-                old_vocab is not None
-                and old_vocab_size == vocab_size
-                and old_vocab == tokenizer.vocab
-            ):
-
-                old_model = ODXBrain(
-                    vocab_size=vocab_size
-                )
-
-                old_model.load_state_dict(
-                    old_checkpoint[
-                        "model_state"
-                    ]
-                )
-
-                old_loss = calculate_loss(
-                    old_model,
-                    samples,
-                    vocab_size
-                )
-
-                print(
-                    f"🧪 Old Brain Loss: "
-                    f"{old_loss:.6f}"
-                )
-
-        except Exception as error:
-
-            print(
-                "Old model comparison skipped:",
-                error
-            )
+    # -------------------------------------------------
+    # Only activate a model that improved.
+    # -------------------------------------------------
 
     should_activate = (
-        old_loss is None
-        or new_loss <= old_loss
+        new_loss <= old_loss
     )
 
     if should_activate:
@@ -421,7 +667,7 @@ def train():
         )
 
         print(
-            "Old Brain remains active."
+            "🛡️ Old Brain remains active."
         )
 
     print(

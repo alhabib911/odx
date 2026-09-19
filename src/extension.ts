@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { spawn } from 'child_process';
 
 import {
   getTaskSummaryInBangla,
@@ -54,6 +55,8 @@ const GEMINI_MODELS = [
   'gemini-2.5-pro'
 ];
 
+const BUILD_TIMEOUT_MS = 120000;
+
 
 let apiManager: APIManager;
 
@@ -64,7 +67,6 @@ let chatProvider:
 let localBrain:
   | ODXInference
   | undefined;
-
 
 let pendingPrompt = '';
 let pendingExistingCode = '';
@@ -87,7 +89,6 @@ let currentModel =
   GROQ_MODELS[0];
 
 let currentApiId = '';
-
 
 let pendingKnowledgeText = '';
 let pendingKnowledgeSource = '';
@@ -121,7 +122,9 @@ function getProviderModel(
 
   return {
     provider,
-    model: getDefaultModel(provider)
+    model: getDefaultModel(
+      provider
+    )
   };
 }
 
@@ -138,6 +141,39 @@ function detectProviderFromKey(
 
 /*
  * =====================================================
+ * GEMINI EMBEDDING KEY
+ * =====================================================
+ */
+
+function getGeminiEmbeddingApiKey():
+  string | undefined {
+
+  const geminiKeys =
+    apiManager
+      .getAllKeys()
+      .filter(
+        (item) =>
+          item.provider === 'gemini' &&
+          (
+            item.status === 'available' ||
+            item.status === 'warning'
+          )
+      )
+      .sort(
+        (a, b) =>
+          a.usedTokens -
+          b.usedTokens
+      );
+
+  return (
+    geminiKeys[0]?.key?.trim() ||
+    undefined
+  );
+}
+
+
+/*
+ * =====================================================
  * TARGET FILE DETECTION
  * =====================================================
  */
@@ -148,52 +184,274 @@ function detectTargetFile(
 ): string {
 
   const text =
-    prompt.toLowerCase();
+    prompt.toLowerCase().trim();
+
+  const normalizedCurrent =
+    currentFilePath
+      .replace(/\\/g, '/')
+      .trim();
+
+  const currentIsApi =
+    normalizedCurrent.startsWith(
+      'app/api/'
+    ) &&
+    normalizedCurrent.endsWith(
+      '/route.ts'
+    );
+
+  const explicitCurrentFile =
+    text.includes('this file') ||
+    text.includes('current file') ||
+    text.includes('এই ফাইলে') ||
+    text.includes('এই file') ||
+    text.includes('বর্তমান ফাইলে') ||
+    text.includes('এখানেই') ||
+    text.includes('এই ফাইলেই');
 
 
   /*
-   * Next.js API route
+   * =====================================================
+   * API REQUEST
+   * =====================================================
    */
 
-  if (
+  const isApiRequest =
     text.includes('api route') ||
     text.includes('api endpoint') ||
-    text.includes('api') &&
+    text.includes('rest api') ||
+    text.includes('api বানাও') ||
+    text.includes('api তৈরি') ||
+    text.includes('api তৈরি করো') ||
+    text.includes('api তৈরি করুন') ||
+    (
+      text.includes('api') &&
       (
         text.includes('get request') ||
         text.includes('post request') ||
         text.includes('put request') ||
+        text.includes('patch request') ||
         text.includes('delete request')
       )
-  ) {
+    );
 
-    /*
-     * Users API
-     */
+  if (isApiRequest) {
 
-    if (
-      text.includes('user') ||
-      text.includes('users')
+    const resourcePatterns:
+      Array<{
+        words: string[];
+        route: string;
+      }> = [
+
+      {
+        words: [
+          'user',
+          'users',
+          'ব্যবহারকারী'
+        ],
+        route: 'users'
+      },
+
+      {
+        words: [
+          'product',
+          'products',
+          'প্রোডাক্ট',
+          'পণ্য'
+        ],
+        route: 'products'
+      },
+
+      {
+        words: [
+          'todo',
+          'todos',
+          'task',
+          'tasks',
+          'টুডু',
+          'টাস্ক'
+        ],
+        route: 'todos'
+      },
+
+      {
+        words: [
+          'auth',
+          'authentication',
+          'login',
+          'signin',
+          'sign-in',
+          'register',
+          'signup',
+          'sign-up',
+          'অথ',
+          'লগইন'
+        ],
+        route: 'auth'
+      },
+
+      {
+        words: [
+          'order',
+          'orders',
+          'অর্ডার'
+        ],
+        route: 'orders'
+      },
+
+      {
+        words: [
+          'post',
+          'posts',
+          'পোস্ট'
+        ],
+        route: 'posts'
+      },
+
+      {
+        words: [
+          'comment',
+          'comments',
+          'কমেন্ট'
+        ],
+        route: 'comments'
+      },
+
+      {
+        words: [
+          'category',
+          'categories',
+          'ক্যাটাগরি'
+        ],
+        route: 'categories'
+      },
+
+      {
+        words: [
+          'payment',
+          'payments',
+          'পেমেন্ট'
+        ],
+        route: 'payments'
+      },
+
+      {
+        words: [
+          'profile',
+          'profiles',
+          'প্রোফাইল'
+        ],
+        route: 'profile'
+      },
+
+      {
+        words: [
+          'search',
+          'সার্চ'
+        ],
+        route: 'search'
+      }
+    ];
+
+
+    for (
+      const resource
+      of resourcePatterns
     ) {
 
-      return 'app/api/users/route.ts';
+      const matched =
+        resource.words.some(
+          (word) =>
+            text.includes(word)
+        );
+
+      if (matched) {
+
+        if (
+          resource.route ===
+          'auth'
+        ) {
+
+          if (
+            text.includes('login') ||
+            text.includes('sign in') ||
+            text.includes('signin') ||
+            text.includes('লগইন')
+          ) {
+
+            return (
+              'app/api/auth/login/route.ts'
+            );
+          }
+
+          if (
+            text.includes('register') ||
+            text.includes('signup') ||
+            text.includes('sign up')
+          ) {
+
+            return (
+              'app/api/auth/register/route.ts'
+            );
+          }
+
+          return (
+            'app/api/auth/route.ts'
+          );
+        }
+
+        return (
+          `app/api/${resource.route}/route.ts`
+        );
+      }
     }
 
 
-    /*
-     * Try to detect route name
-     */
+    const routePatterns = [
+      /(?:api|route|endpoint)\s+(?:for|named|called|of)?\s*([a-zA-Z0-9_-]+)/i,
+      /(?:api|route|endpoint)[\s:-]+([a-zA-Z0-9_-]+)/i,
+      /\/api\/([a-zA-Z0-9_-]+)/i
+    ];
 
-    const routeMatch =
-      prompt.match(
-        /(?:api|route|endpoint)[\s:-]+([a-zA-Z0-9_-]+)/i
-      );
 
-    if (routeMatch?.[1]) {
+    for (
+      const pattern
+      of routePatterns
+    ) {
 
-      return (
-        `app/api/${routeMatch[1]}/route.ts`
-      );
+      const match =
+        prompt.match(pattern);
+
+      const routeName =
+        match?.[1]
+          ?.trim()
+          .toLowerCase();
+
+      if (
+        routeName &&
+        ![
+          'route',
+          'endpoint',
+          'api',
+          'request',
+          'for',
+          'called',
+          'named'
+        ].includes(routeName)
+      ) {
+
+        return (
+          `app/api/${routeName}/route.ts`
+        );
+      }
+    }
+
+
+    if (
+      currentIsApi &&
+      explicitCurrentFile
+    ) {
+
+      return normalizedCurrent;
     }
 
 
@@ -202,42 +460,201 @@ function detectTargetFile(
 
 
   /*
-   * Next.js page request
+   * =====================================================
+   * UI / COMPONENT REQUEST
+   * =====================================================
    */
 
-  if (
+  const uiWords = [
+    'button',
+    'buttons',
+    'input',
+    'form',
+    'card',
+    'modal',
+    'dialog',
+    'navbar',
+    'header',
+    'footer',
+    'sidebar',
+    'menu',
+    'dropdown',
+    'select',
+    'table',
+    'list',
+    'todo',
+    'counter',
+    'component',
+    'ui',
+    'layout',
+    'dashboard',
+    'page',
+    'hero',
+    'section',
+    'banner',
+
+    'বাটন',
+    'ইনপুট',
+    'ফর্ম',
+    'কার্ড',
+    'মডাল',
+    'হেডার',
+    'ফুটার',
+    'সাইডবার',
+    'মেনু',
+    'কম্পোনেন্ট',
+    'পেজ',
+    'লেআউট'
+  ];
+
+
+  const isUiRequest =
+    uiWords.some(
+      (word) =>
+        text.includes(word)
+    );
+
+
+  if (isUiRequest) {
+
+    if (
+      currentIsApi
+    ) {
+
+      if (
+        explicitCurrentFile
+      ) {
+
+        return normalizedCurrent;
+      }
+
+      return 'app/page.tsx';
+    }
+
+
+    if (
+      normalizedCurrent &&
+      explicitCurrentFile
+    ) {
+
+      return normalizedCurrent;
+    }
+
+
+    if (
+      normalizedCurrent &&
+      (
+        normalizedCurrent.startsWith(
+          'components/'
+        ) ||
+        normalizedCurrent.includes(
+          '/components/'
+        )
+      ) &&
+      normalizedCurrent.endsWith(
+        '.tsx'
+      )
+    ) {
+
+      return normalizedCurrent;
+    }
+
+
+    if (
+      text.includes('component') ||
+      text.includes('কম্পোনেন্ট')
+    ) {
+
+      return (
+        'components/Component.tsx'
+      );
+    }
+
+
+    return 'app/page.tsx';
+  }
+
+
+  /*
+   * =====================================================
+   * PAGE REQUEST
+   * =====================================================
+   */
+
+  const isPageRequest =
     text.includes('next.js page') ||
     text.includes('nextjs page') ||
     text.includes('page তৈরি') ||
-    text.includes('page বানাও')
+    text.includes('page বানাও') ||
+    text.includes('page তৈরি করো') ||
+    text.includes('পেজ তৈরি') ||
+    text.includes('পেজ বানাও') ||
+    text.includes('landing page') ||
+    text.includes('ল্যান্ডিং পেজ');
+
+
+  if (
+    isPageRequest
   ) {
 
-    return currentFilePath ||
-      'app/page.tsx';
+    if (
+      normalizedCurrent &&
+      !currentIsApi &&
+      explicitCurrentFile
+    ) {
+
+      return normalizedCurrent;
+    }
+
+
+    if (
+      currentIsApi
+    ) {
+
+      return 'app/page.tsx';
+    }
+
+
+    return (
+      normalizedCurrent ||
+      'app/page.tsx'
+    );
   }
 
 
   /*
-   * Component request
+   * =====================================================
+   * EXPLICIT CURRENT FILE
+   * =====================================================
    */
 
   if (
-    text.includes('component') &&
-    !text.includes('page component')
+    explicitCurrentFile &&
+    normalizedCurrent
   ) {
 
-    return currentFilePath ||
-      'components/Component.tsx';
+    return normalizedCurrent;
   }
 
 
   /*
-   * Default:
-   * current active file
+   * =====================================================
+   * DEFAULT
+   * =====================================================
    */
 
-  return currentFilePath ||
-    'app/page.tsx';
+  if (
+    currentIsApi
+  ) {
+
+    return 'app/page.tsx';
+  }
+
+
+  return (
+    normalizedCurrent ||
+    'app/page.tsx'
+  );
 }
 
 
@@ -310,11 +727,81 @@ function trimBuildError(
   error: string
 ): string {
 
-  if (error.length <= 12000) {
+  if (
+    error.length <= 12000
+  ) {
+
     return error;
   }
 
-  return error.slice(0, 12000);
+  return error.slice(
+    0,
+    12000
+  );
+}
+
+
+/*
+ * =====================================================
+ * SOURCE NORMALIZER
+ * =====================================================
+ */
+
+function normalizeSourceText(
+  value: string
+): string {
+
+  let result =
+    String(
+      value || ''
+    );
+
+  /*
+   * Convert literal escaped newlines into
+   * actual source-code newlines.
+   */
+
+  result =
+    result.replace(
+      /\\r\\n/g,
+      '\n'
+    );
+
+  result =
+    result.replace(
+      /\\n/g,
+      '\n'
+    );
+
+  result =
+    result.replace(
+      /\\r/g,
+      '\n'
+    );
+
+  result =
+    result.replace(
+      /\\t/g,
+      '\t'
+    );
+
+  /*
+   * Escaped quotes.
+   */
+
+  result =
+    result.replace(
+      /\\"/g,
+      '"'
+    );
+
+  result =
+    result.replace(
+      /\\'/g,
+      "'"
+    );
+
+  return result;
 }
 
 
@@ -329,12 +816,67 @@ function cleanGeneratedCode(
 ): string {
 
   let result =
-    String(code || '').trim();
+    String(
+      code || ''
+    ).trim();
+
+
+  if (
+    !result
+  ) {
+
+    return '';
+  }
+
 
   result =
     result.replace(
       /^\uFEFF/,
       ''
+    );
+
+
+  /*
+   * First try JSON string decoding.
+   * This handles responses like:
+   *
+   * "\"use client\";\\n\\nimport React..."
+   */
+
+  if (
+    result.startsWith('"') &&
+    result.endsWith('"')
+  ) {
+
+    try {
+
+      const parsed =
+        JSON.parse(
+          result
+        );
+
+      if (
+        typeof parsed ===
+        'string'
+      ) {
+
+        result =
+          parsed;
+      }
+
+    } catch {
+      // Ignore and continue.
+    }
+  }
+
+
+  /*
+   * Convert escaped source text.
+   */
+
+  result =
+    normalizeSourceText(
+      result
     );
 
 
@@ -356,68 +898,8 @@ function cleanGeneratedCode(
 
 
   /*
-   * Fix escaped quotes.
-   */
-
-  result =
-    result.replace(
-      /\\"/g,
-      '"'
-    );
-
-  result =
-    result.replace(
-      /\\'/g,
-      "'"
-    );
-
-
-  /*
-   * Decode JSON encoded string.
-   */
-
-  if (
-    result.startsWith('"') &&
-    result.endsWith('"')
-  ) {
-
-    try {
-
-      const parsed =
-        JSON.parse(result);
-
-      if (
-        typeof parsed === 'string'
-      ) {
-
-        result = parsed;
-      }
-
-    } catch {
-      // Ignore.
-    }
-  }
-
-
-  /*
-   * Remove fences again.
-   */
-
-  result =
-    result.replace(
-      /^```(?:tsx|ts|jsx|js|typescript|javascript)?\s*/i,
-      ''
-    );
-
-  result =
-    result.replace(
-      /\s*```$/i,
-      ''
-    );
-
-
-  /*
-   * Remove accidental explanation.
+   * Remove accidental explanation
+   * before actual code.
    */
 
   const codeMarkers = [
@@ -434,26 +916,40 @@ function cleanGeneratedCode(
     'type '
   ];
 
-  const positions: number[] = [];
+
+  const positions:
+    number[] = [];
+
 
   for (
-    const marker of codeMarkers
+    const marker
+    of codeMarkers
   ) {
 
     const position =
-      result.indexOf(marker);
+      result.indexOf(
+        marker
+      );
 
-    if (position >= 0) {
-      positions.push(position);
+    if (
+      position >= 0
+    ) {
+
+      positions.push(
+        position
+      );
     }
   }
+
 
   if (
     positions.length > 0
   ) {
 
     const firstCodePosition =
-      Math.min(...positions);
+      Math.min(
+        ...positions
+      );
 
     if (
       firstCodePosition > 0
@@ -465,6 +961,7 @@ function cleanGeneratedCode(
         );
     }
   }
+
 
   return result.trim();
 }
@@ -488,7 +985,7 @@ function buildAutoFixPrompt(
       .test(buildError);
 
   const quoteError =
-    /unterminated string|unexpected token|invalid character|parsing ecmascript/i
+    /unterminated string|unexpected token|invalid character|parsing ecmascript|expected 'from'|expected unicode escape/i
       .test(buildError);
 
 
@@ -529,6 +1026,9 @@ STRICT RULES:
 12. Do not repeat the broken code.
 13. Make the smallest safe change.
 14. The final code MUST compile.
+15. Do NOT return literal \\n sequences between source lines.
+16. Use real newlines.
+17. Do NOT duplicate existing buttons/components.
 
 SOURCE CODE QUOTE RULE:
 
@@ -540,50 +1040,29 @@ Incorrect:
 
 \\"use client\\";
 
-Incorrect:
-
-\\\\"use client\\\\";
-
-The final source must contain normal TypeScript/TSX syntax.
-
 NEXT.JS RULES:
 
 - Respect the current Next.js version.
 - Respect React Client Component and Server Component rules.
-- If the file contains "use client", keep it a valid Client Component.
+- If the file contains "use client", keep it valid.
 - Do NOT create an invalid Client Component + Server Action combination.
-- Do NOT use "use server" inside a Client Component incorrectly.
-- Do NOT use useFormState or useFormStatus unless actually required.
-- Do NOT add forms or Server Actions when the user's request does not need them.
-- Preserve the requested UI/functionality.
+- Do NOT use "use server" incorrectly.
+- Preserve requested functionality.
 - Prefer the simplest valid solution.
 
 NEXT.JS FILE STRUCTURE RULES:
 
-- API routes MUST be placed inside app/api/**/route.ts.
-- Do NOT put a Next.js API GET/POST/PUT/DELETE handler inside app/page.tsx.
-- Page UI must remain inside page.tsx.
-- If the request is for an API route, preserve page.tsx unless the user explicitly asks to change it.
-- If a required API route file does not exist, create that route file.
+- API routes MUST be inside app/api/**/route.ts.
+- Do NOT put API route handlers inside app/page.tsx.
+- Page UI remains in page.tsx.
+- Preserve unrelated code.
 
 ${
   nextJsError
     ? `
-IMPORTANT:
-
-The build error is related to Next.js/React Client-Server rules.
-
-Inspect:
-
-- "use client"
-- "use server"
-- Server Actions
-- useFormState
-- useFormStatus
-- react-dom imports
-- Client Component restrictions
-
-Do NOT simply return the same architecture.
+The error is related to Next.js/React client-server rules.
+Inspect "use client", "use server", Server Actions,
+useFormState, useFormStatus and react-dom imports.
 `
     : ''
 }
@@ -591,34 +1070,28 @@ Do NOT simply return the same architecture.
 ${
   quoteError
     ? `
-IMPORTANT:
+IMPORTANT SOURCE PARSING FIX:
 
-This is a source parsing/quote error.
+The generated source contains escaped source text.
 
-The generated source contains escaped quotes.
+Convert:
 
-Convert escaped source-code quotes into normal source-code quotes.
+\\\\n
 
-Example:
+into real line breaks.
 
-BROKEN:
+Convert escaped quotes into normal source quotes.
 
-\\"use client\\";
+Do not return a JSON string.
 
-CORRECT:
-
-"use client";
-
-The final file must be directly compilable.
+The final output must be a complete real TypeScript/TSX file.
 `
     : ''
 }
 
 TASK:
 
-Fix the error and return the COMPLETE corrected file:
-
-${filePath}
+Fix the error and return the COMPLETE corrected file.
 
 ONLY SOURCE CODE.
 `.trim();
@@ -627,7 +1100,7 @@ ONLY SOURCE CODE.
 
 /*
  * =====================================================
- * CHAT RESPONSE HELPERS
+ * CHAT HELPERS
  * =====================================================
  */
 
@@ -637,7 +1110,9 @@ function getGeneratorInfo(
   model?: string
 ): string {
 
-  if (isLocalBrain) {
+  if (
+    isLocalBrain
+  ) {
 
     return `
 🤖 Code Generator:
@@ -653,6 +1128,7 @@ odx-brain
 Local AI
 `.trim();
   }
+
 
   return `
 🤖 Code Generator:
@@ -693,13 +1169,22 @@ function getKnowledgeSource(
 `.trim();
   }
 
-  if (hasMemory) {
+
+  if (
+    hasMemory
+  ) {
+
     return '🧠 ODX Knowledge';
   }
 
-  if (hasOpenKnowledge) {
+
+  if (
+    hasOpenKnowledge
+  ) {
+
     return '🌐 Open Knowledge';
   }
+
 
   return '⚪ No external knowledge found';
 }
@@ -711,7 +1196,9 @@ function buildCodeChangePreview(
   filePath: string
 ): string {
 
-  if (!oldCode.trim()) {
+  if (
+    !oldCode.trim()
+  ) {
 
     return `
 📄 File:
@@ -776,7 +1263,9 @@ ${newCode}
 
 function syncApiPool(): void {
 
-  if (!chatProvider) {
+  if (
+    !chatProvider
+  ) {
     return;
   }
 
@@ -792,13 +1281,22 @@ function setCurrentApi(
   apiId: string
 ): void {
 
-  currentProvider = provider;
-  currentModel = model;
-  currentApiId = apiId;
+  currentProvider =
+    provider;
 
-  if (!chatProvider) {
+  currentModel =
+    model;
+
+  currentApiId =
+    apiId;
+
+
+  if (
+    !chatProvider
+  ) {
     return;
   }
+
 
   chatProvider.syncCurrentApi(
     provider,
@@ -812,11 +1310,15 @@ function setCurrentApi(
 
 function clearCurrentApi(): void {
 
-  currentApiId = '';
+  currentApiId =
+    '';
 
-  if (!chatProvider) {
+  if (
+    !chatProvider
+  ) {
     return;
   }
+
 
   chatProvider.syncCurrentApi(
     currentProvider,
@@ -842,7 +1344,9 @@ async function checkProject(
 }> {
 
   return new Promise(
-    (resolve) => {
+    (
+      resolve
+    ) => {
 
       const terminal =
         vscode.window.createTerminal({
@@ -850,79 +1354,191 @@ async function checkProject(
           cwd: workspaceFolder
         });
 
+
       terminal.show(true);
+
 
       const shell =
         process.platform === 'win32'
           ? 'cmd.exe'
           : 'sh';
 
+
       const command =
         process.platform === 'win32'
           ? '/c npm run build'
           : '-c "npm run build"';
 
+
       const child =
-        require('child_process').spawn(
+        spawn(
           shell,
           [command],
           {
-            cwd: workspaceFolder,
-            shell: false
+            cwd:
+              workspaceFolder,
+
+            shell:
+              false,
+
+            windowsHide:
+              true
           }
         );
 
-      let output = '';
+
+      let output =
+        '';
+
+      let finished =
+        false;
+
+
+      const timer =
+        setTimeout(
+          () => {
+
+            if (
+              finished
+            ) {
+              return;
+            }
+
+
+            finished =
+              true;
+
+
+            try {
+              child.kill();
+            } catch {
+              // Ignore.
+            }
+
+
+            terminal.dispose();
+
+
+            resolve({
+              success:
+                false,
+
+              output:
+                'ODX Build Timeout: npm run build 120 seconds-এর মধ্যে শেষ হয়নি।'
+            });
+
+          },
+          BUILD_TIMEOUT_MS
+        );
+
 
       child.stdout.on(
         'data',
-        (data: Buffer) => {
+        (
+          data: Buffer
+        ) => {
 
           const text =
             data.toString();
 
-          output += text;
+          output +=
+            text;
 
-          console.log(text);
+          console.log(
+            text
+          );
         }
       );
+
 
       child.stderr.on(
         'data',
-        (data: Buffer) => {
+        (
+          data: Buffer
+        ) => {
 
           const text =
             data.toString();
 
-          output += text;
+          output +=
+            text;
 
-          console.error(text);
+          console.error(
+            text
+          );
         }
       );
 
+
       child.on(
         'close',
-        (code: number) => {
+        (
+          code: number
+        ) => {
+
+          if (
+            finished
+          ) {
+            return;
+          }
+
+
+          finished =
+            true;
+
+
+          clearTimeout(
+            timer
+          );
+
 
           terminal.dispose();
 
+
           resolve({
-            success: code === 0,
+            success:
+              code === 0,
+
             output:
-              trimBuildError(output)
+              trimBuildError(
+                output
+              )
           });
         }
       );
 
+
       child.on(
         'error',
-        (error: Error) => {
+        (
+          error: Error
+        ) => {
+
+          if (
+            finished
+          ) {
+            return;
+          }
+
+
+          finished =
+            true;
+
+
+          clearTimeout(
+            timer
+          );
+
 
           terminal.dispose();
 
+
           resolve({
-            success: false,
-            output: error.message
+            success:
+              false,
+
+            output:
+              error.message
           });
         }
       );
@@ -946,15 +1562,23 @@ function getNextApi(
     .getAllKeys()
     .filter(
       (item) =>
-        item.provider === provider &&
+        item.provider ===
+          provider &&
         (
-          item.status === 'available' ||
-          item.status === 'warning'
+          item.status ===
+            'available' ||
+          item.status ===
+            'warning'
         ) &&
-        !triedApiIds.has(item.id)
+        !triedApiIds.has(
+          item.id
+        )
     )
     .sort(
-      (a, b) =>
+      (
+        a,
+        b
+      ) =>
         a.usedTokens -
         b.usedTokens
     )[0];
@@ -982,17 +1606,32 @@ function activateApi(
       api.key
     );
 
-  if (!provider) {
+
+  if (
+    !provider
+  ) {
     return;
   }
 
-  const model =
-    getDefaultModel(provider);
 
-  pendingProvider = provider;
-  pendingModel = model;
-  pendingApiKey = api.key;
-  pendingApiId = api.id;
+  const model =
+    getDefaultModel(
+      provider
+    );
+
+
+  pendingProvider =
+    provider;
+
+  pendingModel =
+    model;
+
+  pendingApiKey =
+    api.key;
+
+  pendingApiId =
+    api.id;
+
 
   setCurrentApi(
     provider,
@@ -1029,18 +1668,22 @@ async function generateWithFallback(
   const triedApiIds =
     new Set<string>();
 
-  const providers: AIProvider[] =
-    provider === 'groq'
-      ? ['groq', 'gemini']
-      : ['gemini', 'groq'];
+
+  const providers:
+    AIProvider[] =
+      provider === 'groq'
+        ? ['groq', 'gemini']
+        : ['gemini', 'groq'];
 
 
   for (
-    const currentProvider of providers
+    const currentProvider
+    of providers
   ) {
 
     const currentModel =
-      currentProvider === provider
+      currentProvider ===
+        provider
         ? model
         : getDefaultModel(
             currentProvider
@@ -1059,11 +1702,18 @@ async function generateWithFallback(
           triedApiIds
         );
 
-      if (!api) {
+
+      if (
+        !api
+      ) {
         break;
       }
 
-      triedApiIds.add(api.id);
+
+      triedApiIds.add(
+        api.id
+      );
+
 
       try {
 
@@ -1072,6 +1722,7 @@ async function generateWithFallback(
           currentModel,
           api.id
         );
+
 
         const result =
           await generateCodeWithAI(
@@ -1083,23 +1734,31 @@ async function generateWithFallback(
             api.key
           );
 
+
         result.code =
           cleanGeneratedCode(
             result.code
           );
 
+
         await apiManager.recordRequest(
           api.id
         );
 
+
         syncApiPool();
+
 
         return {
           result,
-          provider: currentProvider,
-          model: currentModel,
-          apiKey: api.key,
-          apiId: api.id
+          provider:
+            currentProvider,
+          model:
+            currentModel,
+          apiKey:
+            api.key,
+          apiId:
+            api.id
         };
 
       } catch (
@@ -1111,14 +1770,21 @@ async function generateWithFallback(
             ? error.message
             : String(error);
 
+
         if (
-          !isApiFailureError(error)
+          !isApiFailureError(
+            error
+          )
         ) {
+
           throw error;
         }
 
+
         if (
-          isInvalidApiKeyError(error)
+          isInvalidApiKeyError(
+            error
+          )
         ) {
 
           await apiManager.markError(
@@ -1134,6 +1800,7 @@ async function generateWithFallback(
           );
         }
 
+
         if (
           currentApiId ===
           api.id
@@ -1142,10 +1809,12 @@ async function generateWithFallback(
           clearCurrentApi();
         }
 
+
         syncApiPool();
       }
     }
   }
+
 
   throw new Error(
     'কোনো valid/available API Key পাওয়া যায়নি।'
@@ -1175,18 +1844,22 @@ async function getSummaryWithFallback(
   const triedApiIds =
     new Set<string>();
 
-  const providers: AIProvider[] =
-    provider === 'groq'
-      ? ['groq', 'gemini']
-      : ['gemini', 'groq'];
+
+  const providers:
+    AIProvider[] =
+      provider === 'groq'
+        ? ['groq', 'gemini']
+        : ['gemini', 'groq'];
 
 
   for (
-    const currentProvider of providers
+    const currentProvider
+    of providers
   ) {
 
     const currentModel =
-      currentProvider === provider
+      currentProvider ===
+        provider
         ? model
         : getDefaultModel(
             currentProvider
@@ -1205,11 +1878,18 @@ async function getSummaryWithFallback(
           triedApiIds
         );
 
-      if (!api) {
+
+      if (
+        !api
+      ) {
         break;
       }
 
-      triedApiIds.add(api.id);
+
+      triedApiIds.add(
+        api.id
+      );
+
 
       try {
 
@@ -1219,6 +1899,7 @@ async function getSummaryWithFallback(
           api.id
         );
 
+
         const summary =
           await getTaskSummaryInBangla(
             prompt,
@@ -1227,18 +1908,25 @@ async function getSummaryWithFallback(
             api.key
           );
 
+
         await apiManager.recordRequest(
           api.id
         );
 
+
         syncApiPool();
+
 
         return {
           summary,
-          provider: currentProvider,
-          model: currentModel,
-          apiKey: api.key,
-          apiId: api.id
+          provider:
+            currentProvider,
+          model:
+            currentModel,
+          apiKey:
+            api.key,
+          apiId:
+            api.id
         };
 
       } catch (
@@ -1250,14 +1938,21 @@ async function getSummaryWithFallback(
             ? error.message
             : String(error);
 
+
         if (
-          !isApiFailureError(error)
+          !isApiFailureError(
+            error
+          )
         ) {
+
           throw error;
         }
 
+
         if (
-          isInvalidApiKeyError(error)
+          isInvalidApiKeyError(
+            error
+          )
         ) {
 
           await apiManager.markError(
@@ -1273,6 +1968,7 @@ async function getSummaryWithFallback(
           );
         }
 
+
         if (
           currentApiId ===
           api.id
@@ -1281,10 +1977,12 @@ async function getSummaryWithFallback(
           clearCurrentApi();
         }
 
+
         syncApiPool();
       }
     }
   }
+
 
   throw new Error(
     'কোনো valid/available API Key পাওয়া যায়নি।'
@@ -1307,19 +2005,29 @@ async function addAPIKey(
       ? 'Groq'
       : 'Gemini';
 
+
   const key =
     await vscode.window.showInputBox({
       prompt:
         `${providerName} API Key দিন`,
-      password: true,
-      ignoreFocusOut: true,
+
+      password:
+        true,
+
+      ignoreFocusOut:
+        true,
+
       placeHolder:
         `${providerName} API Key`
     });
 
-  if (!key) {
+
+  if (
+    !key
+  ) {
     return;
   }
+
 
   try {
 
@@ -1328,21 +2036,31 @@ async function addAPIKey(
         key.trim()
       );
 
+
     const providerInfo =
       getProviderModel(
         result.provider
       );
+
 
     const savedApi =
       apiManager.getKey(
         result.id
       );
 
-    if (savedApi) {
-      activateApi(savedApi);
+
+    if (
+      savedApi
+    ) {
+
+      activateApi(
+        savedApi
+      );
     }
 
+
     syncApiPool();
+
 
     vscode.window.showInformationMessage(
       `${result.provider.toUpperCase()} API Key added successfully. Model: ${providerInfo.model}`
@@ -1372,6 +2090,7 @@ async function removeAPIKey(): Promise<void> {
   const keys =
     apiManager.getDisplayInfo();
 
+
   if (
     keys.length === 0
   ) {
@@ -1383,17 +2102,21 @@ async function removeAPIKey(): Promise<void> {
     return;
   }
 
+
   const items =
     keys.map(
       (item) => ({
         label:
           `${item.provider.toUpperCase()} — ${item.status}`,
+
         description:
           `Requests: ${item.totalRequests} | Tokens: ${item.totalTokens}`,
+
         id:
           item.id
       })
     );
+
 
   const selected =
     await vscode.window.showQuickPick(
@@ -1404,13 +2127,18 @@ async function removeAPIKey(): Promise<void> {
       }
     );
 
-  if (!selected) {
+
+  if (
+    !selected
+  ) {
     return;
   }
+
 
   await apiManager.removeKey(
     selected.id
   );
+
 
   if (
     currentApiId ===
@@ -1419,17 +2147,28 @@ async function removeAPIKey(): Promise<void> {
 
     clearCurrentApi();
 
+
     const nextApi =
       getAutoSelectedApi();
 
-    if (nextApi) {
-      activateApi(nextApi);
+
+    if (
+      nextApi
+    ) {
+
+      activateApi(
+        nextApi
+      );
+
     } else {
+
       clearCurrentApi();
     }
   }
 
+
   syncApiPool();
+
 
   vscode.window.showInformationMessage(
     'API Key removed successfully.'
@@ -1448,6 +2187,7 @@ async function showAPIKeys(): Promise<void> {
   const keys =
     apiManager.getDisplayInfo();
 
+
   if (
     keys.length === 0
   ) {
@@ -1459,15 +2199,21 @@ async function showAPIKeys(): Promise<void> {
     return;
   }
 
+
   const text =
     keys
       .map(
-        (item, index) => {
+        (
+          item,
+          index
+        ) => {
 
           const active =
-            item.id === currentApiId
+            item.id ===
+              currentApiId
               ? ' ← CURRENTLY USING'
               : '';
+
 
           return (
             `${index + 1}. ` +
@@ -1479,7 +2225,10 @@ async function showAPIKeys(): Promise<void> {
           );
         }
       )
-      .join('\n');
+      .join(
+        '\n'
+      );
+
 
   vscode.window.showInformationMessage(
     text
@@ -1505,6 +2254,7 @@ async function clearAllAPIKeys(): Promise<void> {
       'Cancel'
     );
 
+
   if (
     confirmation !==
     'Yes'
@@ -1512,11 +2262,13 @@ async function clearAllAPIKeys(): Promise<void> {
     return;
   }
 
+
   await apiManager.clearAll();
 
   clearCurrentApi();
 
   syncApiPool();
+
 
   vscode.window.showInformationMessage(
     'সব API Key remove করা হয়েছে.'
@@ -1535,27 +2287,34 @@ export function activate(
 ): void {
 
   apiManager =
-    new APIManager(context);
+    new APIManager(
+      context
+    );
+
 
   localBrain =
     new ODXInference();
 
+
   localBrain
     .initialize()
-    .then(() => {
+    .then(
+      () => {
 
-      console.log(
-        'ODX Local Brain initialized successfully.'
-      );
+        console.log(
+          'ODX Local Brain initialized successfully.'
+        );
+      }
+    )
+    .catch(
+      (error) => {
 
-    })
-    .catch((error) => {
-
-      console.error(
-        'ODX Local Brain initialization failed:',
-        error
-      );
-    });
+        console.error(
+          'ODX Local Brain initialization failed:',
+          error
+        );
+      }
+    );
 
 
   chatProvider =
@@ -1599,6 +2358,7 @@ export function activate(
           return;
         }
 
+
         currentProvider =
           provider as AIProvider;
 
@@ -1611,13 +2371,17 @@ export function activate(
         pendingModel =
           currentModel;
 
+
         const selectedApi =
           getNextApi(
             currentProvider,
             new Set<string>()
           );
 
-        if (selectedApi) {
+
+        if (
+          selectedApi
+        ) {
 
           setCurrentApi(
             currentProvider,
@@ -1637,6 +2401,7 @@ export function activate(
         }
       },
 
+
       async (
         _provider:
           | 'groq'
@@ -1649,21 +2414,31 @@ export function activate(
           const cleanKey =
             apiKey.trim();
 
+
           const result =
             await apiManager.addKeyAuto(
               cleanKey
             );
+
 
           const savedApi =
             apiManager.getKey(
               result.id
             );
 
-          if (savedApi) {
-            activateApi(savedApi);
+
+          if (
+            savedApi
+          ) {
+
+            activateApi(
+              savedApi
+            );
           }
 
+
           syncApiPool();
+
 
           vscode.window.showInformationMessage(
             `${result.provider.toUpperCase()} API Key added successfully.`
@@ -1681,29 +2456,43 @@ export function activate(
         }
       },
 
+
       async (
         id: string
       ) => {
 
         try {
 
-          await apiManager.removeKey(id);
+          await apiManager.removeKey(
+            id
+          );
+
 
           if (
-            currentApiId === id
+            currentApiId ===
+            id
           ) {
 
             clearCurrentApi();
 
+
             const nextApi =
               getAutoSelectedApi();
 
-            if (nextApi) {
-              activateApi(nextApi);
+
+            if (
+              nextApi
+            ) {
+
+              activateApi(
+                nextApi
+              );
             }
           }
 
+
           syncApiPool();
+
 
           vscode.window.showInformationMessage(
             'API Key removed successfully.'
@@ -1730,7 +2519,8 @@ export function activate(
       chatProvider,
       {
         webviewOptions: {
-          retainContextWhenHidden: true
+          retainContextWhenHidden:
+            true
         }
       }
     )
@@ -1771,7 +2561,9 @@ export function activate(
       'my-mini-agent.addGroqKey',
       async () => {
 
-        await addAPIKey('groq');
+        await addAPIKey(
+          'groq'
+        );
       }
     )
   );
@@ -1783,7 +2575,9 @@ export function activate(
       'my-mini-agent.addGeminiKey',
       async () => {
 
-        await addAPIKey('gemini');
+        await addAPIKey(
+          'gemini'
+        );
       }
     )
   );
@@ -1830,12 +2624,18 @@ export function activate(
 
       syncApiPool();
 
+
       const autoApi =
         getAutoSelectedApi();
 
-      if (autoApi) {
 
-        activateApi(autoApi);
+      if (
+        autoApi
+      ) {
+
+        activateApi(
+          autoApi
+        );
 
       } else {
 
@@ -1870,7 +2670,10 @@ async function handleUserPrompt(
   const cleanPrompt =
     prompt.trim();
 
-  if (!cleanPrompt) {
+
+  if (
+    !cleanPrompt
+  ) {
     return;
   }
 
@@ -1878,7 +2681,10 @@ async function handleUserPrompt(
   const workspace =
     vscode.workspace.workspaceFolders?.[0];
 
-  if (!workspace) {
+
+  if (
+    !workspace
+  ) {
 
     vscode.window.showErrorMessage(
       'প্রথমে একটি VS Code project/workspace open করুন।'
@@ -1888,15 +2694,12 @@ async function handleUserPrompt(
   }
 
 
-  /*
-   * Reset pending state
-   */
-
   pendingPrompt =
     cleanPrompt;
 
   pendingWorkspaceFolder =
     workspace.uri.fsPath;
+
 
   pendingKnowledgeText = '';
   pendingKnowledgeSource = '';
@@ -1905,27 +2708,13 @@ async function handleUserPrompt(
   pendingHasOpenKnowledge = false;
 
 
-  /*
-   * Current editor
-   */
-
   const editorData =
     getActiveEditorCode();
+
 
   const currentFilePath =
     editorData.relativePath;
 
-
-  /*
-   * IMPORTANT:
-   *
-   * Active editor file আর সব task-এর
-   * target file নয়।
-   *
-   * API route হলে target হবে:
-   *
-   * app/api/users/route.ts
-   */
 
   pendingFilePath =
     detectTargetFile(
@@ -1934,11 +2723,9 @@ async function handleUserPrompt(
     );
 
 
-  /*
-   * Existing code load
-   */
+  pendingExistingCode =
+    '';
 
-  pendingExistingCode = '';
 
   if (
     pendingFilePath ===
@@ -1958,29 +2745,27 @@ async function handleUserPrompt(
           pendingFilePath
         );
 
+
       const targetDocument =
         await vscode.workspace.openTextDocument(
           targetUri
         );
+
 
       pendingExistingCode =
         targetDocument.getText();
 
     } catch {
 
-      /*
-       * File does not exist.
-       * New file will be created.
-       */
-
-      pendingExistingCode = '';
+      pendingExistingCode =
+        '';
     }
   }
 
 
   /*
    * =================================================
-   * ODX MEMORY SEARCH
+   * MEMORY SEARCH
    * =================================================
    */
 
@@ -1989,6 +2774,7 @@ async function handleUserPrompt(
     vectorResults: []
   };
 
+
   try {
 
     memory =
@@ -1996,7 +2782,9 @@ async function handleUserPrompt(
         cleanPrompt
       );
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
 
     console.error(
       'ODX Memory search failed:',
@@ -2028,34 +2816,37 @@ async function handleUserPrompt(
     hasMemory;
 
 
-  /*
-   * =================================================
-   * BUILD MEMORY KNOWLEDGE
-   * =================================================
-   */
-
-  if (hasMemory) {
+  if (
+    hasMemory
+  ) {
 
     const memoryItems = [
       ...(memory.textResults || []),
       ...(memory.vectorResults || [])
     ];
 
+
     pendingKnowledgeText =
       memoryItems
         .map(
           (item: any) =>
-            item.content ||
-            item.code_content ||
-            item.knowledge ||
-            item.prompt ||
-            ''
+            [
+              item.prompt || '',
+              item.file_path || '',
+              item.code_content || '',
+              item.knowledge || '',
+              item.content || ''
+            ]
+              .filter(Boolean)
+              .join('\n')
         )
         .filter(
           (item: string) =>
             item.trim().length > 0
         )
-        .join('\n\n');
+        .join(
+          '\n\n====================\n\n'
+        );
 
 
     if (
@@ -2074,7 +2865,9 @@ async function handleUserPrompt(
    * =================================================
    */
 
-  if (!hasMemory) {
+  if (
+    !hasMemory
+  ) {
 
     try {
 
@@ -2103,17 +2896,20 @@ async function handleUserPrompt(
           openKnowledge
             .map(
               (item) =>
-                `${item.title || ''}
-
-${item.content || ''}
-
-Source:
-
-${item.source || ''}
-
-${item.url || ''}`
+                [
+                  item.title || '',
+                  item.content || '',
+                  item.source
+                    ? `Source: ${item.source}`
+                    : '',
+                  item.url || ''
+                ]
+                  .filter(Boolean)
+                  .join('\n')
             )
-            .join('\n\n');
+            .join(
+              '\n\n====================\n\n'
+            );
 
 
         if (
@@ -2128,7 +2924,9 @@ ${item.url || ''}`
         }
       }
 
-    } catch (error) {
+    } catch (
+      error
+    ) {
 
       console.error(
         'Open Knowledge search failed:',
@@ -2147,9 +2945,14 @@ ${item.url || ''}`
   const selectedApi =
     getAutoSelectedApi();
 
-  if (selectedApi) {
 
-    activateApi(selectedApi);
+  if (
+    selectedApi
+  ) {
+
+    activateApi(
+      selectedApi
+    );
 
   } else {
 
@@ -2169,13 +2972,12 @@ ${item.url || ''}`
   try {
 
     let summaryText =
-      `এই কাজের জন্য ${
-        pendingFilePath ||
-        'বর্তমান file'
-      }-এ প্রয়োজনীয় code পরিবর্তন করা হবে।`;
+      `এই কাজের জন্য ${pendingFilePath}-এ প্রয়োজনীয় code পরিবর্তন করা হবে。`;
 
 
-    if (pendingApiKey) {
+    if (
+      pendingApiKey
+    ) {
 
       try {
 
@@ -2186,6 +2988,7 @@ ${item.url || ''}`
             pendingModel,
             pendingApiKey
           );
+
 
         pendingProvider =
           summary.provider;
@@ -2210,7 +3013,9 @@ ${item.url || ''}`
         summaryText =
           summary.summary;
 
-      } catch (error) {
+      } catch (
+        error
+      ) {
 
         console.log(
           'Summary API unavailable.',
@@ -2227,7 +3032,7 @@ ${item.url || ''}`
       );
 
 
-    const changePlan =
+    chatProvider?.showConfirmation(
       `
 📋 কী Change হবে:
 
@@ -2235,19 +3040,13 @@ ${summaryText}
 
 📄 Target File:
 
-${pendingFilePath || 'নতুন/বর্তমান file'}
+${pendingFilePath}
 
 ${buildCodeChangePreview(
   pendingExistingCode,
   '(Generated code approval-এর পর এখানে বসবে)',
   pendingFilePath
 )}
-`.trim();
-
-
-    chatProvider?.showConfirmation(
-      `
-${changePlan}
 
 📚 Information Source:
 
@@ -2342,10 +3141,17 @@ async function handleApproval(): Promise<void> {
             code: string;
           };
 
-          provider: AIProvider;
-          model: string;
-          apiKey: string;
-          apiId: string;
+          provider:
+            AIProvider;
+
+          model:
+            string;
+
+          apiKey:
+            string;
+
+          apiId:
+            string;
         }
       | undefined;
 
@@ -2356,7 +3162,7 @@ async function handleApproval(): Promise<void> {
 
     /*
      * =================================================
-     * LOCAL BRAIN INITIALIZE
+     * LOCAL BRAIN INIT
      * =================================================
      */
 
@@ -2369,7 +3175,9 @@ async function handleApproval(): Promise<void> {
 
         await localBrain.initialize();
 
-      } catch (error) {
+      } catch (
+        error
+      ) {
 
         console.error(
           'Local Brain initialization failed:',
@@ -2381,7 +3189,7 @@ async function handleApproval(): Promise<void> {
 
     /*
      * =================================================
-     * LOCAL BRAIN GENERATION
+     * LOCAL BRAIN
      * =================================================
      */
 
@@ -2408,7 +3216,12 @@ odx-brain
         );
 
 
-        const localPrompt = `
+        const geminiEmbeddingApiKey =
+          getGeminiEmbeddingApiKey();
+
+
+        const localPrompt =
+          `
 USER REQUEST:
 
 ${pendingPrompt}
@@ -2431,35 +3244,32 @@ ${pendingKnowledgeText || 'No external knowledge found.'}
 
 IMPORTANT NEXT.JS FILE RULES:
 
-- If the target is an API route, generate ONLY the API route source.
-- Next.js App Router API routes MUST use app/api/**/route.ts.
-- NEVER place API route GET/POST/PUT/DELETE handlers inside app/page.tsx.
-- Do NOT mix page UI code with API route code.
+- API routes MUST use app/api/**/route.ts.
+- NEVER place API route handlers inside app/page.tsx.
+- UI tasks must stay in UI/page/component files.
 - Preserve unrelated existing code.
-- If the target file does not exist, generate the complete new file.
-- The generated code must match the TARGET FILE.
+- Do not duplicate existing components or buttons unless user explicitly requests a new one.
+- If user asks for a new button, create one new button only.
+- If user asks to modify an existing button, modify only that button.
+- If user asks to add text under a button, keep the button unchanged.
+- Return COMPLETE SOURCE CODE.
+- Return real newlines.
+- Do NOT return literal \\n sequences.
+- Do NOT return escaped JSON strings.
+- Do NOT return Markdown.
+- Do NOT return code fences.
+- Do NOT return explanations.
 
 TASK:
 
-Generate the required code for the user's request.
-
-Use the provided ODX Knowledge when relevant.
-
-If existing code is present, preserve unrelated functionality.
-
-Return ONLY the complete source code.
-
-Do NOT return Markdown.
-
-Do NOT return code fences.
-
-Do NOT return explanations.
+Generate the required code.
 `.trim();
 
 
         const localResult =
           await localBrain.generateCode(
-            localPrompt
+            localPrompt,
+            geminiEmbeddingApiKey
           );
 
 
@@ -2475,9 +3285,7 @@ Do NOT return explanations.
         ) {
 
           generated = {
-
             result: {
-
               filePath:
                 pendingFilePath,
 
@@ -2529,7 +3337,9 @@ Build error পাওয়া গেলে automatic fix চেষ্টা কর
           );
         }
 
-      } catch (error) {
+      } catch (
+        error
+      ) {
 
         console.log(
           'Local Brain failed.',
@@ -2541,24 +3351,36 @@ Build error পাওয়া গেলে automatic fix চেষ্টা কর
 
     /*
      * =================================================
-     * TEACHER AI FALLBACK
+     * TEACHER AI
      * =================================================
      */
 
-    if (!generated) {
+    if (
+      !generated
+    ) {
 
-      if (!pendingApiKey) {
+      if (
+        !pendingApiKey
+      ) {
 
         const autoApi =
           getAutoSelectedApi();
 
-        if (autoApi) {
-          activateApi(autoApi);
+
+        if (
+          autoApi
+        ) {
+
+          activateApi(
+            autoApi
+          );
         }
       }
 
 
-      if (!pendingApiKey) {
+      if (
+        !pendingApiKey
+      ) {
 
         throw new Error(
           'Local Brain কাজটি করতে পারেনি এবং কোনো valid Groq/Gemini API Key নেই।'
@@ -2589,7 +3411,8 @@ ${
       );
 
 
-      const teacherPrompt = `
+      const teacherPrompt =
+        `
 USER REQUEST:
 
 ${pendingPrompt}
@@ -2609,16 +3432,20 @@ ${pendingKnowledgeText || 'No external knowledge found.'}
 STRICT NEXT.JS RULES:
 
 1. Follow the requested target file exactly.
-2. If this is an API route, use app/api/**/route.ts.
-3. NEVER put an API route handler inside app/page.tsx.
-4. Do not modify page.tsx for an API-only request unless explicitly required.
-5. If the target file does not exist, create the complete source for that file.
-6. Preserve unrelated existing functionality.
+2. API routes use app/api/**/route.ts.
+3. NEVER put API handlers in app/page.tsx.
+4. UI requests must remain UI code.
+5. Preserve unrelated existing functionality.
+6. Do not duplicate an existing component/button unless explicitly requested.
 7. Return COMPLETE SOURCE CODE ONLY.
-8. Do NOT return Markdown.
-9. Do NOT return code fences.
-10. Do NOT return explanations.
-11. Do NOT return JSON.
+8. Return real newlines.
+9. Do NOT return literal \\n sequences.
+10. Do NOT return escaped JSON strings.
+11. Do NOT return Markdown.
+12. Do NOT return code fences.
+13. Do NOT return explanations.
+14. Do NOT return JSON.
+15. Final source must compile.
 `.trim();
 
 
@@ -2636,7 +3463,7 @@ STRICT NEXT.JS RULES:
 
     /*
      * =================================================
-     * UPDATE CURRENT API
+     * UPDATE API
      * =================================================
      */
 
@@ -2659,15 +3486,13 @@ STRICT NEXT.JS RULES:
       );
 
 
-    /*
-     * Force correct target file
-     */
-
     generated.result.filePath =
       pendingFilePath;
 
 
-    if (generated.apiId) {
+    if (
+      generated.apiId
+    ) {
 
       setCurrentApi(
         generated.provider,
@@ -2679,11 +3504,13 @@ STRICT NEXT.JS RULES:
 
     /*
      * =================================================
-     * TEACHER GENERATED MESSAGE
+     * TEACHER PREVIEW
      * =================================================
      */
 
-    if (!generatedByLocalBrain) {
+    if (
+      !generatedByLocalBrain
+    ) {
 
       chatProvider?.addMessage(
         'agent',
@@ -2708,12 +3535,13 @@ ${buildCodeChangePreview(
     }
 
 
-    let lastBuildError = '';
+    let lastBuildError =
+      '';
 
 
     /*
      * =================================================
-     * BUILD / BUG FIX LOOP
+     * BUILD / FIX LOOP
      * =================================================
      */
 
@@ -2722,6 +3550,23 @@ ${buildCodeChangePreview(
       attempt <= 3;
       attempt++
     ) {
+
+      generated.result.code =
+        cleanGeneratedCode(
+          generated.result.code
+        );
+
+
+      if (
+        !generated.result.code.trim()
+      ) {
+
+        lastBuildError =
+          'Generated code is empty.';
+
+        break;
+      }
+
 
       chatProvider?.addMessage(
         'agent',
@@ -2735,12 +3580,6 @@ ${generated.result.filePath}
 ⏳ Project build/test চলছে...
 `.trim()
       );
-
-
-      generated.result.code =
-        cleanGeneratedCode(
-          generated.result.code
-        );
 
 
       await writeCodeToFile(
@@ -2757,18 +3596,12 @@ ${generated.result.filePath}
 
 
       /*
-       * =================================================
-       * BUILD SUCCESS
-       * =================================================
+       * SUCCESS
        */
 
       if (
         build.success
       ) {
-
-        /*
-         * Create embedding
-         */
 
         let embedding:
           | number[]
@@ -2777,9 +3610,17 @@ ${generated.result.filePath}
 
         try {
 
-          embedding =
-            await createEmbedding(
-              `
+          const geminiEmbeddingApiKey =
+            getGeminiEmbeddingApiKey();
+
+
+          if (
+            geminiEmbeddingApiKey
+          ) {
+
+            embedding =
+              await createEmbedding(
+                `
 Prompt:
 
 ${pendingPrompt}
@@ -2791,12 +3632,21 @@ ${pendingKnowledgeText}
 Solution:
 
 ${generated.result.code}
-`.trim()
+`.trim(),
+                geminiEmbeddingApiKey
+              );
+
+
+            console.log(
+              '✅ ODX embedding successfully created.'
             );
+          }
 
-        } catch (error) {
+        } catch (
+          error
+        ) {
 
-          console.log(
+          console.error(
             'Embedding creation failed:',
             error
           );
@@ -2804,7 +3654,7 @@ ${generated.result.code}
 
 
         /*
-         * Save successful solution
+         * MEMORY
          */
 
         try {
@@ -2813,12 +3663,12 @@ ${generated.result.code}
             pendingPrompt,
             generated.result.filePath,
             generated.result.code,
-            embedding
-              ? embedding
-              : []
+            embedding || []
           );
 
-        } catch (error) {
+        } catch (
+          error
+        ) {
 
           console.error(
             'ODX Knowledge save failed:',
@@ -2828,12 +3678,11 @@ ${generated.result.code}
 
 
         /*
-         * Save training data
+         * TRAINING
          */
 
         const trainingSaved =
           await saveTrainingData({
-
             prompt:
               pendingPrompt,
 
@@ -2848,7 +3697,8 @@ ${generated.result.code}
         const generatorName =
           generatedByLocalBrain
             ? 'ODX Local Brain'
-            : generated.provider === 'groq'
+            : generated.provider ===
+                'groq'
               ? 'Groq'
               : 'Google Gemini';
 
@@ -2900,7 +3750,7 @@ ${
 
 ${
   trainingSaved
-    ? '✅ Training Data-তে save হয়েছে'
+    ? '✅ New Training Data save/retrain pipeline completed'
     : 'ℹ️ Duplicate হওয়ায় নতুন Training Data save হয়নি'
 }
 `.trim()
@@ -2917,9 +3767,7 @@ ${
 
 
       /*
-       * =================================================
        * BUILD FAILED
-       * =================================================
        */
 
       lastBuildError =
@@ -2941,7 +3789,10 @@ ${generated.result.filePath}
 
 🔴 Error:
 
-${lastBuildError.slice(0, 3000)}
+${lastBuildError.slice(
+  0,
+  3000
+)}
 
 🔧 Auto Fix:
 
@@ -2953,15 +3804,10 @@ ${lastBuildError.slice(0, 3000)}
       if (
         attempt >= 3
       ) {
+
         break;
       }
 
-
-      /*
-       * =================================================
-       * AUTO FIX PROMPT
-       * =================================================
-       */
 
       const fixPrompt =
         buildAutoFixPrompt(
@@ -2973,9 +3819,7 @@ ${lastBuildError.slice(0, 3000)}
 
 
       /*
-       * =================================================
-       * LOCAL BRAIN AUTO FIX
-       * =================================================
+       * LOCAL BRAIN FIX
        */
 
       let fixedByLocalBrain =
@@ -3005,9 +3849,14 @@ odx-brain
           );
 
 
+          const geminiEmbeddingApiKey =
+            getGeminiEmbeddingApiKey();
+
+
           const localFix =
             await localBrain.generateCode(
-              fixPrompt
+              fixPrompt,
+              geminiEmbeddingApiKey
             );
 
 
@@ -3026,7 +3875,6 @@ odx-brain
 
             generated.result.code =
               cleanedLocalFix;
-
 
             fixedByLocalBrain =
               true;
@@ -3050,9 +3898,17 @@ odx-brain
 🔍 আবার Build Check করা হবে...
 `.trim()
             );
+
+          } else {
+
+            console.log(
+              'Local Brain returned no meaningful fix.'
+            );
           }
 
-        } catch (error) {
+        } catch (
+          error
+        ) {
 
           console.log(
             'Local Brain auto-fix failed.',
@@ -3063,25 +3919,36 @@ odx-brain
 
 
       /*
-       * =================================================
-       * TEACHER AI AUTO FIX
-       * =================================================
+       * TEACHER AI FIX
        */
 
-      if (!fixedByLocalBrain) {
+      if (
+        !fixedByLocalBrain
+      ) {
 
-        if (!pendingApiKey) {
+        if (
+          !pendingApiKey
+        ) {
 
           const autoApi =
             getAutoSelectedApi();
 
-          if (autoApi) {
-            activateApi(autoApi);
+
+          if (
+            autoApi
+          ) {
+
+            activateApi(
+              autoApi
+            );
           }
         }
 
 
-        if (!pendingApiKey) {
+        if (
+          !pendingApiKey
+        ) {
+
           break;
         }
 
@@ -3126,6 +3993,23 @@ ${pendingModel}
 
 
         if (
+          !fixedCode.trim()
+        ) {
+
+          chatProvider?.addMessage(
+            'agent',
+            `
+⚠️ Teacher AI empty code ফিরিয়েছে।
+
+🔄 Fix attempt বন্ধ করা হয়েছে।
+`.trim()
+          );
+
+          break;
+        }
+
+
+        if (
           fixedCode.trim() ===
           generated.result.code.trim()
         ) {
@@ -3135,7 +4019,7 @@ ${pendingModel}
             `
 ⚠️ Teacher AI একই code ফিরিয়েছে।
 
-🔄 এই fix attempt সফল ধরা হচ্ছে না।
+🔄 Fix attempt বন্ধ করা হয়েছে।
 `.trim()
           );
 
@@ -3144,9 +4028,7 @@ ${pendingModel}
 
 
         generated = {
-
           result: {
-
             filePath:
               generated.result.filePath,
 
@@ -3224,7 +4106,6 @@ ${lastBuildError}
       '❌ ODX code generation failed.'
     );
 
-
   } catch (
     error: unknown
   ) {
@@ -3266,9 +4147,13 @@ ${message}
 
 export function deactivate(): void {
 
-  if (localBrain) {
+  if (
+    localBrain
+  ) {
+
     localBrain.unload();
   }
+
 
   console.log(
     'ODX Mini Agent deactivated.'
