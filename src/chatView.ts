@@ -1,108 +1,129 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 
-export class AgentChatProvider
-  implements vscode.WebviewViewProvider {
-
-  public static readonly viewType =
-    'my-mini-agent.chatView';
+export class AgentChatProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'my-mini-agent.chatView';
 
   private _view?: vscode.WebviewView;
+  private _knowledgeCounterStarted = false;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
-
-    private readonly _onUserPrompt:
-      (prompt: string) => void,
-
-    private readonly _onActionConfirm:
-      (action: 'approve' | 'skip') => void,
-
-    private readonly _onUpdateSettings:
-      (provider: string, model: string) => void,
-
-    private readonly _onAddApiKey:
-      (
-        provider: 'groq' | 'gemini',
-        apiKey: string
-      ) => void,
-
-    private readonly _onRemoveApiKey:
-      (id: string) => void
+    private readonly _onUserPrompt: (prompt: string) => void,
+    private readonly _onActionConfirm: (action: 'approve' | 'skip') => void,
+    private readonly _onUpdateSettings: (provider: string, model: string) => void,
+    private readonly _onAddApiKey: (
+      provider: 'groq' | 'gemini',
+      apiKey: string
+    ) => void,
+    private readonly _onRemoveApiKey: (id: string) => void
   ) {}
 
-  public resolveWebviewView(
-    webviewView: vscode.WebviewView
-  ) {
+  public resolveWebviewView(webviewView: vscode.WebviewView) {
     this._view = webviewView;
+
+    this.startKnowledgeCounter();
 
     webviewView.webview.options = {
       enableScripts: true
     };
 
-    webviewView.webview.html =
-      this._getHtmlForWebview(
-        webviewView.webview
-      );
+    webviewView.webview.html = this._getHtmlForWebview(
+      webviewView.webview
+    );
 
-    webviewView.webview.onDidReceiveMessage(
-      (data) => {
+    webviewView.webview.onDidReceiveMessage((data) => {
+      if (data.type === 'userPrompt') {
+        this._onUserPrompt(data.value);
+        return;
+      }
 
-        if (data.type === 'userPrompt') {
+      if (data.type === 'actionResponse') {
+        this._onActionConfirm(data.value);
+        return;
+      }
 
-          this._onUserPrompt(
-            data.value
-          );
+      if (data.type === 'updateSettings') {
+        this._onUpdateSettings(
+          data.provider,
+          data.model
+        );
+        return;
+      }
 
-        } else if (
-          data.type === 'actionResponse'
+      if (data.type === 'addApiKey') {
+        if (
+          (data.provider === 'groq' ||
+            data.provider === 'gemini') &&
+          typeof data.apiKey === 'string'
         ) {
-
-          this._onActionConfirm(
-            data.value
-          );
-
-        } else if (
-          data.type === 'updateSettings'
-        ) {
-
-          this._onUpdateSettings(
+          this._onAddApiKey(
             data.provider,
-            data.model
+            data.apiKey
           );
+        }
 
-        } else if (
-          data.type === 'addApiKey'
-        ) {
+        return;
+      }
 
-          if (
-            (
-              data.provider === 'groq' ||
-              data.provider === 'gemini'
-            ) &&
-            typeof data.apiKey === 'string'
-          ) {
-
-            this._onAddApiKey(
-              data.provider,
-              data.apiKey
-            );
-          }
-
-        } else if (
-          data.type === 'removeApiKey'
-        ) {
-
-          if (
-            typeof data.id === 'string'
-          ) {
-
-            this._onRemoveApiKey(
-              data.id
-            );
-          }
+      if (data.type === 'removeApiKey') {
+        if (typeof data.id === 'string') {
+          this._onRemoveApiKey(data.id);
         }
       }
-    );
+    });
+  }
+
+  private startKnowledgeCounter() {
+    if (this._knowledgeCounterStarted) {
+      return;
+    }
+
+    this._knowledgeCounterStarted = true;
+
+    const updateCounter = () => {
+      try {
+        const progressFile = path.join(
+          this._extensionUri.fsPath,
+          'odx-data',
+          'knowledge-local',
+          'worker',
+          'progress.json'
+        );
+
+        if (!fs.existsSync(progressFile)) {
+          this._view?.webview.postMessage({
+            type: 'knowledgeCount',
+            count: 0
+          });
+
+          return;
+        }
+
+        const raw = fs.readFileSync(
+          progressFile,
+          'utf8'
+        );
+
+        const data = JSON.parse(raw);
+
+        const count = Array.isArray(data.processed)
+          ? data.processed.length
+          : 0;
+
+        this._view?.webview.postMessage({
+          type: 'knowledgeCount',
+          count
+        });
+      } catch {
+        // Ignore temporary file read errors.
+      }
+    };
+
+    updateCounter();
+
+    setInterval(updateCounter, 2000);
   }
 
   public addMessage(
@@ -120,9 +141,7 @@ export class AgentChatProvider
     });
   }
 
-  public showConfirmation(
-    summaryText: string
-  ) {
+  public showConfirmation(summaryText: string) {
     if (!this._view) {
       return;
     }
@@ -142,10 +161,9 @@ export class AgentChatProvider
       return;
     }
 
-    const provider =
-      model.startsWith('gemini-')
-        ? 'gemini'
-        : 'groq';
+    const provider = model.startsWith('gemini-')
+      ? 'gemini'
+      : 'groq';
 
     this._view.webview.postMessage({
       type: 'syncStats',
@@ -210,9 +228,7 @@ export class AgentChatProvider
     });
   }
 
-  public startApiCooldown(
-    seconds: number
-  ) {
+  public startApiCooldown(seconds: number) {
     if (!this._view) {
       return;
     }
@@ -226,16 +242,12 @@ export class AgentChatProvider
   private _getHtmlForWebview(
     webview: vscode.Webview
   ): string {
-
     return `<!DOCTYPE html>
 <html lang="en">
-
 <head>
-
 <meta charset="UTF-8">
 
 <style>
-
 * {
   box-sizing: border-box;
 }
@@ -253,15 +265,10 @@ body {
 .header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--vscode-widget-border);
   margin-bottom: 8px;
-}
-
-.header-title {
-  font-size: 13px;
-  font-weight: bold;
 }
 
 .header-right {
@@ -439,6 +446,12 @@ button:disabled {
   margin-top: 5px;
 }
 
+.knowledge-count {
+  font-size: 20px;
+  font-weight: bold;
+  line-height: 1.2;
+}
+
 #chat-history {
   flex: 1;
   overflow-y: auto;
@@ -505,25 +518,15 @@ button:disabled {
   display: none;
   text-align: center;
 }
-
 </style>
-
 </head>
 
 <body>
 
 <div class="header">
-
-  <div class="header-title">
-    ODX Mini Agent
-  </div>
-
   <div class="header-right">
 
-    <div
-      id="current-model"
-      class="current-model"
-    >
+    <div id="current-model" class="current-model">
       GROQ • GPT-OSS 20B
     </div>
 
@@ -535,57 +538,34 @@ button:disabled {
     </button>
 
   </div>
-
 </div>
 
-
-<div
-  id="settings-panel"
-  class="settings-panel"
->
+<div id="settings-panel" class="settings-panel">
 
   <div class="settings-title">
     ⚙️ AI Settings
   </div>
 
-
   <div class="settings-section">
-
-    <label>
-      API Provider
-    </label>
+    <label>API Provider</label>
 
     <select
       id="provider-select"
       onchange="providerChanged()"
     >
-
-      <option value="groq">
-        Groq
-      </option>
-
-      <option value="gemini">
-        Gemini
-      </option>
-
+      <option value="groq">Groq</option>
+      <option value="gemini">Gemini</option>
     </select>
-
   </div>
 
-
   <div class="settings-section">
-
-    <label>
-      Model
-    </label>
+    <label>Model</label>
 
     <select
       id="model-select"
       onchange="updateSettings()"
     ></select>
-
   </div>
-
 
   <div class="settings-section">
 
@@ -612,7 +592,6 @@ button:disabled {
 
   </div>
 
-
   <div class="settings-section">
 
     <div class="api-title">
@@ -628,6 +607,20 @@ button:disabled {
 
   </div>
 
+  <div class="settings-section">
+
+    <div class="api-title">
+      🧠 Knowledge Imported
+    </div>
+
+    <div
+      id="knowledge-count"
+      class="knowledge-count"
+    >
+      0
+    </div>
+
+  </div>
 
   <div
     id="settings-status"
@@ -635,7 +628,6 @@ button:disabled {
   ></div>
 
 </div>
-
 
 <div
   id="cooldown-banner"
@@ -646,9 +638,7 @@ button:disabled {
   seconds
 </div>
 
-
 <div id="chat-history"></div>
-
 
 <div class="input-box">
 
@@ -670,20 +660,15 @@ button:disabled {
 
 </div>
 
-
 <script>
-
-const vscode =
-  acquireVsCodeApi();
+const vscode = acquireVsCodeApi();
 
 let cooldownActive = false;
 let countdownInterval = null;
 let apiPool = [];
 let currentApiId = '';
 
-
 const models = {
-
   groq: [
     {
       value: 'openai/gpt-oss-20b',
@@ -709,32 +694,25 @@ const models = {
       label: 'Gemini 2.5 Pro'
     }
   ]
-
 };
 
-
 function toggleSettings() {
-
-  const panel =
-    document.getElementById(
-      'settings-panel'
-    );
+  const panel = document.getElementById(
+    'settings-panel'
+  );
 
   if (panel) {
     panel.classList.toggle('open');
   }
 }
 
-
 function loadModels(
   provider,
   selectedModel = null
 ) {
-
-  const select =
-    document.getElementById(
-      'model-select'
-    );
+  const select = document.getElementById(
+    'model-select'
+  );
 
   if (!select) {
     return;
@@ -745,55 +723,34 @@ function loadModels(
   const providerModels =
     models[provider] || [];
 
-  providerModels.forEach(
-    model => {
+  providerModels.forEach((model) => {
+    const option =
+      document.createElement('option');
 
-      const option =
-        document.createElement(
-          'option'
-        );
+    option.value = model.value;
+    option.textContent = model.label;
 
-      option.value =
-        model.value;
-
-      option.textContent =
-        model.label;
-
-      select.appendChild(
-        option
-      );
-
-    }
-  );
+    select.appendChild(option);
+  });
 
   if (selectedModel) {
-
-    const exists =
-      providerModels.some(
-        model =>
-          model.value ===
-          selectedModel
-      );
+    const exists = providerModels.some(
+      (model) =>
+        model.value === selectedModel
+    );
 
     if (exists) {
-
-      select.value =
-        selectedModel;
-
+      select.value = selectedModel;
       return;
     }
   }
 
   if (providerModels.length > 0) {
-
-    select.value =
-      providerModels[0].value;
+    select.value = providerModels[0].value;
   }
 }
 
-
 function providerChanged() {
-
   const providerElement =
     document.getElementById(
       'provider-select'
@@ -807,15 +764,11 @@ function providerChanged() {
     providerElement.value;
 
   loadModels(provider);
-
   updateSettings();
-
   renderApiList();
 }
 
-
 function updateSettings() {
-
   const providerElement =
     document.getElementById(
       'provider-select'
@@ -826,10 +779,7 @@ function updateSettings() {
       'model-select'
     );
 
-  if (
-    !providerElement ||
-    !modelElement
-  ) {
+  if (!providerElement || !modelElement) {
     return;
   }
 
@@ -840,13 +790,9 @@ function updateSettings() {
     modelElement.value;
 
   vscode.postMessage({
-
     type: 'updateSettings',
-
     provider,
-
     model
-
   });
 
   updateCurrentModel(
@@ -854,67 +800,25 @@ function updateSettings() {
     model
   );
 
-  showStatus(
-    'Settings saved'
-  );
+  showStatus('Settings saved');
 }
 
-
-/*
- * ================================================
- * API KEY AUTO DETECTION
- * ================================================
- */
-
-function detectProviderFromApiKey(
-  apiKey
-) {
-
+function detectProviderFromApiKey(apiKey) {
   const key =
     String(apiKey || '').trim();
 
-  /*
-   * Groq
-   *
-   * সাধারণ Groq API key:
-   * gsk_...
-   */
-
-  if (
-    key.startsWith('gsk_')
-  ) {
-
+  if (key.startsWith('gsk_')) {
     return 'groq';
   }
 
-
-  /*
-   * Gemini / Google
-   *
-   * সাধারণ Gemini API key:
-   * AIza...
-   */
-
-  if (
-    key.startsWith('AIza')
-  ) {
-
+  if (key.startsWith('AIza')) {
     return 'gemini';
   }
-
 
   return null;
 }
 
-
-/*
- * ================================================
- * ADD API KEY
- * ================================================
- */
-
 function addApiKey() {
-
   const input =
     document.getElementById(
       'api-key-input'
@@ -928,38 +832,17 @@ function addApiKey() {
     input.value.trim();
 
   if (!apiKey) {
-
-    showStatus(
-      'API Key লিখুন'
-    );
-
+    showStatus('API Key লিখুন');
     return;
   }
-
-
-  /*
-   * Provider automatically detect
-   */
 
   const detectedProvider =
-    detectProviderFromApiKey(
-      apiKey
-    );
-
+    detectProviderFromApiKey(apiKey);
 
   if (!detectedProvider) {
-
-    showStatus(
-      'Unknown API Key format'
-    );
-
+    showStatus('Unknown API Key format');
     return;
   }
-
-
-  /*
-   * Provider dropdown automatically update
-   */
 
   const providerElement =
     document.getElementById(
@@ -967,21 +850,11 @@ function addApiKey() {
     );
 
   if (providerElement) {
-
     providerElement.value =
       detectedProvider;
-
   }
 
-
-  /*
-   * Provider-এর default model load
-   */
-
-  loadModels(
-    detectedProvider
-  );
-
+  loadModels(detectedProvider);
 
   const modelElement =
     document.getElementById(
@@ -991,100 +864,45 @@ function addApiKey() {
   const model =
     modelElement?.value || '';
 
-
-  /*
-   * Extension host-কে settings update
-   */
-
   vscode.postMessage({
-
     type: 'updateSettings',
-
-    provider:
-      detectedProvider,
-
+    provider: detectedProvider,
     model
-
   });
-
-
-  /*
-   * API key extension host-এ পাঠানো
-   */
 
   vscode.postMessage({
-
     type: 'addApiKey',
-
-    provider:
-      detectedProvider,
-
+    provider: detectedProvider,
     apiKey
-
   });
-
-
-  /*
-   * Input clear
-   */
 
   input.value = '';
-
-
-  /*
-   * Header update
-   */
 
   updateCurrentModel(
     detectedProvider,
     model
   );
 
-
-  /*
-   * Status
-   */
-
   showStatus(
     detectedProvider.toUpperCase() +
-    ' API Key detected and added'
+      ' API Key detected and added'
   );
-
 
   renderApiList();
 }
 
-
-/*
- * ================================================
- * REMOVE API KEY
- * ================================================
- */
-
 function removeApiKey(id) {
-
   if (!id) {
     return;
   }
 
   vscode.postMessage({
-
     type: 'removeApiKey',
-
     id
-
   });
 }
 
-
-/*
- * ================================================
- * API LIST
- * ================================================
- */
-
 function renderApiList() {
-
   const container =
     document.getElementById(
       'api-list'
@@ -1095,10 +913,7 @@ function renderApiList() {
       'provider-select'
     );
 
-  if (
-    !container ||
-    !providerElement
-  ) {
+  if (!container || !providerElement) {
     return;
   }
 
@@ -1107,14 +922,11 @@ function renderApiList() {
 
   const filtered =
     apiPool.filter(
-      item =>
+      (item) =>
         item.provider === provider
     );
 
-  if (
-    filtered.length === 0
-  ) {
-
+  if (filtered.length === 0) {
     container.innerText =
       'No API keys added';
 
@@ -1123,14 +935,11 @@ function renderApiList() {
 
   container.innerHTML =
     filtered
-      .map(item => {
-
+      .map((item) => {
         const errorHtml =
           item.lastError
             ? '<div class="api-error">' +
-              escapeHtml(
-                item.lastError
-              ) +
+              escapeHtml(item.lastError) +
               '</div>'
             : '';
 
@@ -1151,7 +960,6 @@ function renderApiList() {
               <div>
 
                 <div class="api-name">
-
                   \${escapeHtml(
                     item.provider.toUpperCase()
                   )}
@@ -1161,23 +969,16 @@ function renderApiList() {
                   )}
 
                   \${current}
-
                 </div>
 
                 <div class="api-info">
-
                   \${item.status}
-
                   •
-
                   \${item.usedTokens || 0}
                   tokens
-
                   •
-
                   \${item.totalRequests || 0}
                   requests
-
                 </div>
 
                 \${errorHtml}
@@ -1195,24 +996,13 @@ function renderApiList() {
 
           </div>
         \`;
-
       })
       .join('');
 }
 
-
-/*
- * ================================================
- * ESCAPE
- * ================================================
- */
-
 function escapeHtml(value) {
-
   const div =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   div.textContent =
     String(value);
@@ -1220,29 +1010,13 @@ function escapeHtml(value) {
   return div.innerHTML;
 }
 
-
 function escapeAttribute(value) {
-
   return String(value)
-    .replace(
-      /\\\\/g,
-      '\\\\\\\\'
-    )
-    .replace(
-      /'/g,
-      "\\\\'"
-    );
+    .replace(/\\\\/g, '\\\\\\\\')
+    .replace(/'/g, "\\\\'");
 }
 
-
-/*
- * ================================================
- * STATS
- * ================================================
- */
-
 function renderStats(stats) {
-
   const container =
     document.getElementById(
       'stats-container'
@@ -1256,7 +1030,6 @@ function renderStats(stats) {
     !stats ||
     Object.keys(stats).length === 0
   ) {
-
     container.innerText =
       'No requests yet';
 
@@ -1270,23 +1043,13 @@ function renderStats(stats) {
           '<div>• <b>' +
           escapeHtml(model) +
           '</b>: ' +
-          escapeHtml(
-            String(count)
-          ) +
+          escapeHtml(String(count)) +
           ' requests</div>'
       )
       .join('');
 }
 
-
-/*
- * ================================================
- * STATUS
- * ================================================
- */
-
 function showStatus(text) {
-
   const status =
     document.getElementById(
       'settings-status'
@@ -1296,36 +1059,16 @@ function showStatus(text) {
     return;
   }
 
-  status.innerText =
-    text;
+  status.innerText = text;
 
-  setTimeout(
-    () => {
-
-      if (
-        status.innerText ===
-        text
-      ) {
-
-        status.innerText =
-          '';
-
-      }
-
-    },
-    2500
-  );
+  setTimeout(() => {
+    if (status.innerText === text) {
+      status.innerText = '';
+    }
+  }, 2500);
 }
 
-
-/*
- * ================================================
- * COOLDOWN
- * ================================================
- */
-
 function startCooldown(seconds) {
-
   cooldownActive = true;
 
   const promptInput =
@@ -1356,15 +1099,11 @@ function startCooldown(seconds) {
       'cooldown-timer'
     );
 
-  if (
-    !banner ||
-    !timer
-  ) {
+  if (!banner || !timer) {
     return;
   }
 
-  banner.style.display =
-    'block';
+  banner.style.display = 'block';
 
   let remaining =
     Math.max(
@@ -1376,69 +1115,46 @@ function startCooldown(seconds) {
     String(remaining);
 
   if (countdownInterval) {
-
     clearInterval(
       countdownInterval
     );
   }
 
   countdownInterval =
-    setInterval(
-      () => {
+    setInterval(() => {
+      remaining--;
 
-        remaining--;
+      timer.innerText =
+        String(
+          Math.max(
+            0,
+            remaining
+          )
+        );
 
-        timer.innerText =
-          String(
-            Math.max(
-              0,
-              remaining
-            )
-          );
+      if (remaining <= 0) {
+        clearInterval(
+          countdownInterval
+        );
 
-        if (
-          remaining <= 0
-        ) {
+        countdownInterval = null;
+        cooldownActive = false;
 
-          clearInterval(
-            countdownInterval
-          );
-
-          countdownInterval =
-            null;
-
-          cooldownActive =
-            false;
-
-          if (promptInput) {
-            promptInput.disabled =
-              false;
-          }
-
-          if (sendButton) {
-            sendButton.disabled =
-              false;
-          }
-
-          banner.style.display =
-            'none';
-
+        if (promptInput) {
+          promptInput.disabled = false;
         }
 
-      },
-      1000
-    );
+        if (sendButton) {
+          sendButton.disabled = false;
+        }
+
+        banner.style.display =
+          'none';
+      }
+    }, 1000);
 }
 
-
-/*
- * ================================================
- * SEND PROMPT
- * ================================================
- */
-
 function sendPrompt() {
-
   if (cooldownActive) {
     return;
   }
@@ -1465,7 +1181,6 @@ function sendPrompt() {
     );
 
   if (history) {
-
     const div =
       document.createElement(
         'div'
@@ -1477,53 +1192,27 @@ function sendPrompt() {
     div.innerText =
       'You: ' + value;
 
-    history.appendChild(
-      div
-    );
+    history.appendChild(div);
 
     history.scrollTop =
       history.scrollHeight;
   }
 
   vscode.postMessage({
-
     type: 'userPrompt',
-
     value
-
   });
 
   input.value = '';
 }
 
-
-/*
- * ================================================
- * ENTER KEY
- * ================================================
- */
-
 function handleKeyPress(event) {
-
-  if (
-    event.key ===
-    'Enter'
-  ) {
-
+  if (event.key === 'Enter') {
     sendPrompt();
-
   }
 }
 
-
-/*
- * ================================================
- * APPROVE / SKIP
- * ================================================
- */
-
 function respond(action) {
-
   const box =
     document.getElementById(
       'active-confirm'
@@ -1534,26 +1223,15 @@ function respond(action) {
   }
 
   vscode.postMessage({
-
     type: 'actionResponse',
-
     value: action
-
   });
 }
-
-
-/*
- * ================================================
- * CURRENT MODEL
- * ================================================
- */
 
 function updateCurrentModel(
   provider,
   model
 ) {
-
   const element =
     document.getElementById(
       'current-model'
@@ -1563,48 +1241,26 @@ function updateCurrentModel(
     return;
   }
 
-  let shortModel =
-    model;
+  let shortModel = model;
 
-  if (
-    model ===
-    'openai/gpt-oss-20b'
-  ) {
-
-    shortModel =
-      'GPT-OSS 20B';
-
+  if (model === 'openai/gpt-oss-20b') {
+    shortModel = 'GPT-OSS 20B';
   } else if (
-    model ===
-    'openai/gpt-oss-120b'
+    model === 'openai/gpt-oss-120b'
   ) {
-
-    shortModel =
-      'GPT-OSS 120B';
-
+    shortModel = 'GPT-OSS 120B';
   } else if (
-    model ===
-    'gemini-3.6-flash'
+    model === 'gemini-3.6-flash'
   ) {
-
-    shortModel =
-      'Gemini 3.6 Flash';
-
+    shortModel = 'Gemini 3.6 Flash';
   } else if (
-    model ===
-    'gemini-2.5-flash'
+    model === 'gemini-2.5-flash'
   ) {
-
-    shortModel =
-      'Gemini 2.5 Flash';
-
+    shortModel = 'Gemini 2.5 Flash';
   } else if (
-    model ===
-    'gemini-2.5-pro'
+    model === 'gemini-2.5-pro'
   ) {
-
-    shortModel =
-      'Gemini 2.5 Pro';
+    shortModel = 'Gemini 2.5 Pro';
   }
 
   element.innerText =
@@ -1613,35 +1269,33 @@ function updateCurrentModel(
     shortModel;
 }
 
-
-/*
- * ================================================
- * MESSAGE HANDLER
- * ================================================
- */
-
 window.addEventListener(
   'message',
-  event => {
-
-    const msg =
-      event.data;
+  (event) => {
+    const msg = event.data;
 
     const history =
       document.getElementById(
         'chat-history'
       );
 
+    if (msg.type === 'knowledgeCount') {
+      const element =
+        document.getElementById(
+          'knowledge-count'
+        );
 
-    /*
-     * ADD MESSAGE
-     */
+      if (element) {
+        element.innerText =
+          String(
+            Number(msg.count) || 0
+          );
+      }
 
-    if (
-      msg.type ===
-      'addMessage'
-    ) {
+      return;
+    }
 
+    if (msg.type === 'addMessage') {
       if (!history) {
         return;
       }
@@ -1652,8 +1306,7 @@ window.addEventListener(
         );
 
       div.className =
-        'msg ' +
-        msg.sender;
+        'msg ' + msg.sender;
 
       div.innerText =
         (
@@ -1663,9 +1316,7 @@ window.addEventListener(
         ) +
         msg.text;
 
-      history.appendChild(
-        div
-      );
+      history.appendChild(div);
 
       history.scrollTop =
         history.scrollHeight;
@@ -1673,16 +1324,10 @@ window.addEventListener(
       return;
     }
 
-
-    /*
-     * CONFIRMATION
-     */
-
     if (
       msg.type ===
       'showConfirmation'
     ) {
-
       if (!history) {
         return;
       }
@@ -1746,8 +1391,7 @@ window.addEventListener(
         'Approve & Write';
 
       approve.onclick =
-        () =>
-          respond('approve');
+        () => respond('approve');
 
       const skip =
         document.createElement(
@@ -1761,32 +1405,16 @@ window.addEventListener(
         'Skip';
 
       skip.onclick =
-        () =>
-          respond('skip');
+        () => respond('skip');
 
-      buttons.appendChild(
-        approve
-      );
+      buttons.appendChild(approve);
+      buttons.appendChild(skip);
 
-      buttons.appendChild(
-        skip
-      );
+      box.appendChild(title);
+      box.appendChild(paragraph);
+      box.appendChild(buttons);
 
-      box.appendChild(
-        title
-      );
-
-      box.appendChild(
-        paragraph
-      );
-
-      box.appendChild(
-        buttons
-      );
-
-      history.appendChild(
-        box
-      );
+      history.appendChild(box);
 
       history.scrollTop =
         history.scrollHeight;
@@ -1794,16 +1422,10 @@ window.addEventListener(
       return;
     }
 
-
-    /*
-     * CURRENT API
-     */
-
     if (
       msg.type ===
       'syncCurrentApi'
     ) {
-
       currentApiId =
         msg.apiId || '';
 
@@ -1813,7 +1435,6 @@ window.addEventListener(
         );
 
       if (providerElement) {
-
         providerElement.value =
           msg.provider;
       }
@@ -1833,18 +1454,8 @@ window.addEventListener(
       return;
     }
 
-
-    /*
-     * STATS
-     */
-
-    if (
-      msg.type ===
-      'syncStats'
-    ) {
-
+    if (msg.type === 'syncStats') {
       if (msg.model) {
-
         const provider =
           msg.provider ||
           (
@@ -1861,7 +1472,6 @@ window.addEventListener(
           );
 
         if (providerElement) {
-
           providerElement.value =
             provider;
         }
@@ -1884,20 +1494,12 @@ window.addEventListener(
       return;
     }
 
-
-    /*
-     * API POOL
-     */
-
     if (
       msg.type ===
       'syncApiPool'
     ) {
-
       apiPool =
-        Array.isArray(
-          msg.apiKeys
-        )
+        Array.isArray(msg.apiKeys)
           ? msg.apiKeys
           : [];
 
@@ -1906,34 +1508,18 @@ window.addEventListener(
       return;
     }
 
-
-    /*
-     * COOLDOWN
-     */
-
     if (
       msg.type ===
       'apiCooldown'
     ) {
-
       startCooldown(
         Math.ceil(
           msg.seconds || 60
         )
       );
-
-      return;
     }
-
   }
 );
-
-
-/*
- * ================================================
- * INITIAL UI
- * ================================================
- */
 
 loadModels(
   'groq',
@@ -1944,11 +1530,9 @@ updateCurrentModel(
   'groq',
   'openai/gpt-oss-20b'
 );
-
 </script>
 
 </body>
-
 </html>`;
   }
 }
