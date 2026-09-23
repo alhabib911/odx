@@ -98,6 +98,11 @@ export class AgentChatProvider implements vscode.WebviewViewProvider {
             count: 0
           });
 
+          this._view?.webview.postMessage({
+            type: 'knowledgeStatus',
+            running: false
+          });
+
           return;
         }
 
@@ -116,8 +121,48 @@ export class AgentChatProvider implements vscode.WebviewViewProvider {
           type: 'knowledgeCount',
           count
         });
+
+        /*
+         * Knowledge worker status
+         *
+         * If the worker writes progress.json recently,
+         * we consider the import process active.
+         *
+         * 10 seconds is used as the activity window.
+         */
+        let running = false;
+
+        try {
+          const stat = fs.statSync(progressFile);
+          const age = Date.now() - stat.mtimeMs;
+
+          running = age <= 10000;
+        } catch {
+          running = false;
+        }
+
+        /*
+         * If worker explicitly provides a status,
+         * use that status.
+         */
+        if (data.status === 'running') {
+          running = true;
+        }
+
+        if (data.status === 'stopped') {
+          running = false;
+        }
+
+        this._view?.webview.postMessage({
+          type: 'knowledgeStatus',
+          running
+        });
+
       } catch {
-        // Ignore temporary file read errors.
+        this._view?.webview.postMessage({
+          type: 'knowledgeStatus',
+          running: false
+        });
       }
     };
 
@@ -378,6 +423,52 @@ button:disabled {
   margin-bottom: 5px;
 }
 
+.knowledge-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+
+.knowledge-title-row .api-title {
+  margin-bottom: 0;
+}
+
+.knowledge-status-dot {
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  border-radius: 50%;
+  background: #dc3545;
+}
+
+.knowledge-status-dot.running {
+  background: #28a745;
+  animation: knowledgePulse 1.2s ease-in-out infinite;
+}
+
+.knowledge-status-dot.stopped {
+  background: #dc3545;
+  animation: none;
+}
+
+@keyframes knowledgePulse {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .api-row {
   display: flex;
   align-items: center;
@@ -609,8 +700,18 @@ button:disabled {
 
   <div class="settings-section">
 
-    <div class="api-title">
-      🧠 Knowledge Imported
+    <div class="knowledge-title-row">
+
+      <div class="api-title">
+        🧠 Knowledge Imported
+      </div>
+
+      <div
+        id="knowledge-status-dot"
+        class="knowledge-status-dot stopped"
+        title="Knowledge import stopped"
+      ></div>
+
     </div>
 
     <div
@@ -1013,7 +1114,7 @@ function escapeHtml(value) {
 function escapeAttribute(value) {
   return String(value)
     .replace(/\\\\/g, '\\\\\\\\')
-    .replace(/'/g, "\\\\'");
+    .replace(/'/g, "\\'");
 }
 
 function renderStats(stats) {
@@ -1279,6 +1380,9 @@ window.addEventListener(
         'chat-history'
       );
 
+    /*
+     * Knowledge import count
+     */
     if (msg.type === 'knowledgeCount') {
       const element =
         document.getElementById(
@@ -1291,6 +1395,40 @@ window.addEventListener(
             Number(msg.count) || 0
           );
       }
+
+      return;
+    }
+
+    /*
+     * Knowledge import running/stopped signal
+     */
+    if (msg.type === 'knowledgeStatus') {
+      const dot =
+        document.getElementById(
+          'knowledge-status-dot'
+        );
+
+      if (!dot) {
+        return;
+      }
+
+      const running =
+        Boolean(msg.running);
+
+      dot.classList.toggle(
+        'running',
+        running
+      );
+
+      dot.classList.toggle(
+        'stopped',
+        !running
+      );
+
+      dot.title =
+        running
+          ? 'Knowledge import is running'
+          : 'Knowledge import stopped';
 
       return;
     }

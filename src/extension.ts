@@ -3258,7 +3258,7 @@ IMPORTANT NEXT.JS FILE RULES:
 - Do NOT return escaped JSON strings.
 - Do NOT return Markdown.
 - Do NOT return code fences.
-- Do NOT return explanations.
+- Do NOT add "use client"; unless client-side functionality is actually required, such as useState, useEffect, useRef, event handlers, browser APIs, or other client-only features.
 
 TASK:
 
@@ -3445,7 +3445,7 @@ STRICT NEXT.JS RULES:
 12. Do NOT return code fences.
 13. Do NOT return explanations.
 14. Do NOT return JSON.
-15. Final source must compile.
+15. Do NOT add "use client"; unless client-side functionality is actually required, such as useState, useEffect, useRef, event handlers, browser APIs, or other client-only features.
 `.trim();
 
 
